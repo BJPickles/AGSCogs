@@ -159,25 +159,33 @@ class AGSServerStatus(commands.Cog):
           • "Server {name} is now {status}." 
           • "Alert: {name} (IP: {ip}) switched to {status} at {timestamp} (was {prev_status})."
         
-        To set a custom message, reply to the desired message with one of:
-          [p]serverstatus setmessage online
-          [p]serverstatus setmessage offline
+        To set a custom message, you can either reply to a message containing the text or include it as an argument:
+          [p]serverstatus setmessage online :white_check_mark: {name} is now {status}!
+          [p]serverstatus setmessage offline ⚠️ {name} is now {status} (was {prev_status}).
         
-        If you do not reply, the current message (if any) will be displayed.
+        If no message is provided and you're not replying, the current message (if any) will be displayed.
         """
         await ctx.send_help(ctx.command)
 
     @setmessage.command(name="online")
-    async def setmessage_online(self, ctx):
+    async def setmessage_online(self, ctx, *, message_text: str = None):
         """
         Set or view the custom message for when a realm comes online.
         
-        Example formatting: "Server {name} is now {status}!"
+        Example formatting: "Server {name} is now {status}!" 
+        You can include placeholders such as {name}, {ip}, {port}, {status}, {prev_status}, and {timestamp}.
         
-        If you reply to a message with this command, its contents will be saved as the custom online message.
-        If no reply is provided, the current custom message for online status is displayed.
+        If you reply to a message, that message will be used as the new custom message.
+        Otherwise, if you provide a message as an argument, it will be used.
+        If neither is provided, the current online message is displayed.
         """
-        if ctx.message.reference:
+        if message_text:
+            self.status_messages["online"] = message_text
+            current_messages = await self.config.status_messages()
+            current_messages["online"] = message_text
+            await self.config.status_messages.set(current_messages)
+            await ctx.send("Custom message for online status updated.")
+        elif ctx.message.reference:
             ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
             self.status_messages["online"] = ref_msg.content
             current_messages = await self.config.status_messages()
@@ -192,16 +200,24 @@ class AGSServerStatus(commands.Cog):
                 await ctx.send("No custom message set for online status.")
 
     @setmessage.command(name="offline")
-    async def setmessage_offline(self, ctx):
+    async def setmessage_offline(self, ctx, *, message_text: str = None):
         """
         Set or view the custom message for when a realm goes offline.
         
         Example formatting: "Alert: {name} is now {status} (was {prev_status})."
+        You can include placeholders such as {name}, {ip}, {port}, {status}, {prev_status}, and {timestamp}.
         
-        If you reply to a message with this command, its contents will be saved as the custom offline message.
-        If no reply is provided, the current custom message for offline status is displayed.
+        If you reply to a message, that message will be used as the new custom message.
+        Otherwise, if you provide a message as an argument, it will be used.
+        If neither is provided, the current offline message is displayed.
         """
-        if ctx.message.reference:
+        if message_text:
+            self.status_messages["offline"] = message_text
+            current_messages = await self.config.status_messages()
+            current_messages["offline"] = message_text
+            await self.config.status_messages.set(current_messages)
+            await ctx.send("Custom message for offline status updated.")
+        elif ctx.message.reference:
             ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
             self.status_messages["offline"] = ref_msg.content
             current_messages = await self.config.status_messages()
