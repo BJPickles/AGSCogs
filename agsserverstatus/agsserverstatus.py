@@ -15,7 +15,7 @@ class AGSServerStatus(commands.Cog):
       • {status}      – New status ("online" or "offline")
       • {prev_status} – Previous status ("online", "offline", or "unknown")
       • {timestamp}   – UTC time (YYYY-MM-DD HH:MM:SS UTC)
-    
+      
     NOTE: All settings are saved persistently.
     """
 
@@ -24,17 +24,18 @@ class AGSServerStatus(commands.Cog):
         # Set up persistent config with a unique identifier.
         self.config = Config.get_conf(self, identifier=123456789012345678, force_registration=True)
         default_global = {
-            "servers": {},          # Stored as {name: {"ip": ip, "port": port}}
+            "servers": {},          # Stored as {name: {"ip": ip, "port": port, "enabled": bool}}
             "status_channel": None, # Stored as channel ID
             "status_messages": {},  # Stored as { "online": message, "offline": message }
-            "active": True          # Whether the cog is active
+            "active": True          # Overall toggle
         }
         self.config.register_global(**default_global)
         # In-memory storage (last_status is not persisted)
-        self.servers = {}        # mapping: realm name -> (ip, port, last_status)
+        # Each server is stored as a 4-tuple: (ip, port, last_status, enabled)
+        self.servers = {}
         self.status_channel = None
         self.status_messages = {}
-        self.active = True       # Active by default
+        self.active = True
         # Load persistent settings.
         self.bot.loop.create_task(self.initialize_settings())
         # Start the periodic status-check loop.
@@ -44,8 +45,8 @@ class AGSServerStatus(commands.Cog):
         data = await self.config.all()
         servers = data.get("servers", {})
         for name, details in servers.items():
-            # Persisted servers do not store last_status; initialize it as None.
-            self.servers[name] = (details.get("ip"), details.get("port"), None)
+            # For each server, if "enabled" is not set, default to True.
+            self.servers[name] = (details.get("ip"), details.get("port"), None, details.get("enabled", True))
         self.status_channel = data.get("status_channel")
         self.status_messages = data.get("status_messages", {})
         self.active = data.get("active", True)
@@ -76,9 +77,10 @@ class AGSServerStatus(commands.Cog):
           • add         - Add a server to monitor.
           • remove      - Remove a monitored server.
           • list        - List all monitored servers.
+          • togglerealm - Toggle monitoring on/off for an individual realm.
           • setchannel  - Define the channel for status updates.
           • setmessage  - Set or view a custom status update message.
-          • toggle      - Toggle monitoring on/off.
+          • toggle      - Toggle overall monitoring on/off.
           • view        - View all current settings.
           • formatting  - Display available placeholders.
           • instructions- Show setup instructions.
@@ -99,10 +101,10 @@ class AGSServerStatus(commands.Cog):
         
         If the realm name includes spaces or markdown, enclose it in quotes.
         """
-        self.servers[name] = (ip, port, None)
-        # Update persistent config
+        self.servers[name] = (ip, port, None, True)
+        # Update persistent config – add the "enabled" field.
         current_servers = await self.config.servers()
-        current_servers[name] = {"ip": ip, "port": port}
+        current_servers[name] = {"ip": ip, "port": port, "enabled": True}
         await self.config.servers.set(current_servers)
         await ctx.send(f"Added server {name} at {ip}:{port}.")
 
@@ -111,7 +113,7 @@ class AGSServerStatus(commands.Cog):
         """Remove a monitored server."""
         if name in self.servers:
             del self.servers[name]
-            # Update persistent config
+            # Update persistent config.
             current_servers = await self.config.servers()
             if name in current_servers:
                 del current_servers[name]
@@ -126,17 +128,68 @@ class AGSServerStatus(commands.Cog):
         if not self.servers:
             await ctx.send("No servers are being monitored.")
             return
-
         lines = []
-        for name, (ip, port, status) in self.servers.items():
+        for name, (ip, port, status, enabled) in self.servers.items():
             status_text = "Unknown"
             if status is True:
                 status_text = "Online"
             elif status is False:
                 status_text = "Offline"
-            lines.append(f"{name} - {ip}:{port} - {status_text}")
+            lines.append(f"{name} - {ip}:{port} - {status_text} - {'Enabled' if enabled else 'Disabled'}")
         message = "**Monitored Servers:**\n" + "\n".join(lines)
         await ctx.send(message)
+
+    @serverstatus.command()
+    async def togglerealm(self, ctx, name: str, state: str = None):
+        """
+        Toggle monitoring on or off for an individual realm.
+        
+        Usage: [p]serverstatus togglerealm <realm name> [on/off]
+        Without an on/off argument, the current state will be toggled.
+        """
+        if name not in self.servers:
+            return await ctx.send("Server not found.")
+        ip, port, last_status, enabled = self.servers[name]
+        if state:
+            state = state.lower()
+            if state in ["on", "enable", "enabled"]:
+                new_enabled = True
+            elif state in ["off", "disable", "disabled"]:
+                new_enabled = False
+            else:
+                return await ctx.send("Invalid state. Use on/off.")
+        else:
+            new_enabled = not enabled
+        # Update in-memory value.
+        self.servers[name] = (ip, port, last_status, new_enabled)
+        # Update persistent config.
+        current_servers = await self.config.servers()
+        if name in current_servers:
+            current_servers[name]["enabled"] = new_enabled
+            await self.config.servers.set(current_servers)
+        await ctx.send(f"Monitoring for server {name} is now {'enabled' if new_enabled else 'disabled'}.")
+        if new_enabled:
+            # Immediately check status for that realm and send update.
+            new_status = await self.is_server_online(ip, port)
+            current_status = "online" if new_status else "offline"
+            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            default_message = f"Server {name} is now {current_status}."
+            message_template = self.status_messages.get(current_status, default_message)
+            try:
+                message = message_template.format(
+                    name=name,
+                    ip=ip,
+                    port=port,
+                    status=current_status,
+                    prev_status="unknown",
+                    timestamp=timestamp
+                )
+            except Exception as e:
+                message = default_message
+            if self.status_channel:
+                channel = self.bot.get_channel(self.status_channel)
+                if channel:
+                    await channel.send(message)
 
     @serverstatus.command()
     async def setchannel(self, ctx, channel: discord.TextChannel):
@@ -232,15 +285,15 @@ class AGSServerStatus(commands.Cog):
     @serverstatus.command()
     async def toggle(self, ctx):
         """
-        Toggle the server status monitoring on or off.
+        Toggle the overall server status monitoring on or off.
         
-        When toggled off, the cog will not check realm status or send update messages.
-        When toggled on, it will immediately send an update for all servers and resume normal operation.
+        When toggled off, no status checks or update messages will be performed.
+        When toggled on, an immediate update for all servers is sent and monitoring resumes.
         """
         self.active = not self.active
         await self.config.active.set(self.active)
         state_str = "enabled" if self.active else "disabled"
-        await ctx.send(f"Server status monitoring has been {state_str}.")
+        await ctx.send(f"Overall server status monitoring has been {state_str}.")
         if self.active:
             await self.run_status_update()
 
@@ -251,13 +304,12 @@ class AGSServerStatus(commands.Cog):
         channel = self.bot.get_channel(self.status_channel)
         if not channel:
             return
-        for name, (ip, port, _) in list(self.servers.items()):
+        for name, (ip, port, _, enabled) in list(self.servers.items()):
+            if not enabled:
+                continue
             new_status = await self.is_server_online(ip, port)
             current_status = "online" if new_status else "offline"
-            # Set previous status as unknown for the immediate update
-            previous_status = "unknown"
             timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-            self.servers[name] = (ip, port, new_status)
             default_message = f"Server {name} is now {current_status}."
             message_template = self.status_messages.get(current_status, default_message)
             try:
@@ -266,7 +318,7 @@ class AGSServerStatus(commands.Cog):
                     ip=ip,
                     port=port,
                     status=current_status,
-                    prev_status=previous_status,
+                    prev_status="unknown",
                     timestamp=timestamp
                 )
             except Exception as e:
@@ -280,30 +332,30 @@ class AGSServerStatus(commands.Cog):
         
         This displays:
           • The designated channel for status updates.
-          • The list of monitored servers (with IP, port, and current status).
+          • The list of monitored servers (with IP, port, current status, and whether monitoring is enabled).
           • Any custom messages that have been set.
         """
         embed = discord.Embed(title="AGSServerStatus Settings", color=discord.Color.blue())
-        # Display the status channel
+        # Display the status channel.
         if self.status_channel:
             channel = self.bot.get_channel(self.status_channel)
             embed.add_field(name="Status Channel", value=channel.mention if channel else f"ID: {self.status_channel}", inline=False)
         else:
             embed.add_field(name="Status Channel", value="Not set", inline=False)
-        # Display monitored servers
+        # Display monitored servers.
         if self.servers:
             server_lines = []
-            for name, (ip, port, status) in self.servers.items():
+            for name, (ip, port, status, enabled) in self.servers.items():
                 status_text = "Unknown"
                 if status is True:
                     status_text = "Online"
                 elif status is False:
                     status_text = "Offline"
-                server_lines.append(f"**{name}** - {ip}:{port} - {status_text}")
+                server_lines.append(f"**{name}** - {ip}:{port} - {status_text} - {'Enabled' if enabled else 'Disabled'}")
             embed.add_field(name="Monitored Servers", value="\n".join(server_lines), inline=False)
         else:
             embed.add_field(name="Monitored Servers", value="No servers have been added.", inline=False)
-        # Display custom status messages
+        # Display custom status messages.
         if self.status_messages:
             message_lines = []
             for key, msg in self.status_messages.items():
@@ -397,9 +449,8 @@ class AGSServerStatus(commands.Cog):
                        "Type 'I agree' within 60 seconds to confirm.")
         try:
             def check(m):
-                return (m.author == ctx.author and m.channel == ctx.channel 
-                        and m.content.strip().lower() == "i agree")
-            confirmation = await self.bot.wait_for("message", check=check, timeout=60)
+                return (m.author == ctx.author and m.channel == ctx.channel and m.content.strip().lower() == "i agree")
+            await self.bot.wait_for("message", check=check, timeout=60)
         except asyncio.TimeoutError:
             return await ctx.send("Reset cancelled due to timeout.")
         # Reset all in-memory values.
@@ -430,13 +481,15 @@ class AGSServerStatus(commands.Cog):
         channel = self.bot.get_channel(self.status_channel)
         if not channel:
             return
-        for name, (ip, port, last_status) in list(self.servers.items()):
+        for name, (ip, port, last_status, enabled) in list(self.servers.items()):
+            if not enabled:
+                continue
             new_status = await self.is_server_online(ip, port)
             if last_status is None or new_status != last_status:
                 current_status = "online" if new_status else "offline"
                 previous_status = "unknown" if last_status is None else ("online" if last_status else "offline")
                 timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-                self.servers[name] = (ip, port, new_status)
+                self.servers[name] = (ip, port, new_status, enabled)
                 default_message = f"Server {name} is now {current_status}."
                 message_template = self.status_messages.get(current_status, default_message)
                 try:
