@@ -75,7 +75,8 @@ class AGSServerStatus(commands.Cog):
           • list        - List all monitored servers.
           • setchannel  - Define the channel for status updates.
           • setmessage  - Set a custom status update message.
-          • view        - View all settings.
+          • view        - View all current settings.
+          • formatting  - Display available placeholders.
           • instructions- Show setup instructions.
           • reset       - Reset (wipe) all settings (bot owner only).
         
@@ -99,7 +100,7 @@ class AGSServerStatus(commands.Cog):
         current_servers = await self.config.servers()
         current_servers[name] = {"ip": ip, "port": port}
         await self.config.servers.set(current_servers)
-        await ctx.send(f"Added server '{name}' at {ip}:{port}.")
+        await ctx.send(f"Added server {name} at {ip}:{port}.")
 
     @serverstatus.command()
     async def remove(self, ctx, name: str):
@@ -111,7 +112,7 @@ class AGSServerStatus(commands.Cog):
             if name in current_servers:
                 del current_servers[name]
                 await self.config.servers.set(current_servers)
-            await ctx.send(f"Removed server '{name}'.")
+            await ctx.send(f"Removed server {name}.")
         else:
             await ctx.send("Server not found.")
 
@@ -129,7 +130,7 @@ class AGSServerStatus(commands.Cog):
                 status_text = "Online"
             elif status is False:
                 status_text = "Offline"
-            lines.append(f"`{name}` - {ip}:{port} - {status_text}")
+            lines.append(f"{name} - {ip}:{port} - {status_text}")
         message = "**Monitored Servers:**\n" + "\n".join(lines)
         await ctx.send(message)
 
@@ -209,6 +210,30 @@ class AGSServerStatus(commands.Cog):
         else:
             embed.add_field(name="Custom Status Messages", value="No custom messages set.", inline=False)
         await ctx.send(embed=embed)
+
+    @serverstatus.command()
+    async def formatting(self, ctx):
+        """
+        Display a list of available placeholders for custom message formatting.
+        
+        Placeholders:
+          • {name}        - Realm name
+          • {ip}          - Server IP address
+          • {port}        - Server port number
+          • {status}      - New status ("online" or "offline")
+          • {prev_status} - Previous status ("online", "offline", or "unknown")
+          • {timestamp}   - UTC timestamp (YYYY-MM-DD HH:MM:SS UTC)
+        """
+        message = (
+            "**Available Placeholders for Custom Messages:**\n\n"
+            "**{name}** - Realm name\n"
+            "**{ip}** - Server IP address\n"
+            "**{port}** - Server port number\n"
+            "**{status}** - New status (\"online\" or \"offline\")\n"
+            "**{prev_status}** - Previous status (\"online\", \"offline\", or \"unknown\")\n"
+            "**{timestamp}** - UTC timestamp (YYYY-MM-DD HH:MM:SS UTC)"
+        )
+        await ctx.send(message)
 
     @serverstatus.group(name="instructions", invoke_without_command=True)
     async def instructions(self, ctx):
@@ -308,7 +333,7 @@ class AGSServerStatus(commands.Cog):
                 previous_status = "unknown" if last_status is None else ("online" if last_status else "offline")
                 timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
                 self.servers[name] = (ip, port, new_status)
-                default_message = f"Server `{name}` is now {current_status}."
+                default_message = f"Server {name} is now {current_status}."
                 message_template = self.status_messages.get(current_status, default_message)
                 try:
                     # Format the custom message with defined placeholders.
