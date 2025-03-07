@@ -15,7 +15,7 @@ class AGSServerStatus(commands.Cog):
       • {status}      – New status ("online" or "offline")
       • {prev_status} – Previous status ("online", "offline", or "unknown")
       • {timestamp}   – UTC time (YYYY-MM-DD HH:MM:SS UTC)
-      
+    
     NOTE: All settings are saved persistently.
     """
 
@@ -26,13 +26,15 @@ class AGSServerStatus(commands.Cog):
         default_global = {
             "servers": {},          # Stored as {name: {"ip": ip, "port": port}}
             "status_channel": None, # Stored as channel ID
-            "status_messages": {}   # Stored as { "online": message, "offline": message }
+            "status_messages": {},  # Stored as { "online": message, "offline": message }
+            "active": True          # Whether the cog is active
         }
         self.config.register_global(**default_global)
         # In-memory storage (last_status is not persisted)
         self.servers = {}        # mapping: realm name -> (ip, port, last_status)
         self.status_channel = None
         self.status_messages = {}
+        self.active = True       # Active by default
         # Load persistent settings.
         self.bot.loop.create_task(self.initialize_settings())
         # Start the periodic status-check loop.
@@ -46,6 +48,7 @@ class AGSServerStatus(commands.Cog):
             self.servers[name] = (details.get("ip"), details.get("port"), None)
         self.status_channel = data.get("status_channel")
         self.status_messages = data.get("status_messages", {})
+        self.active = data.get("active", True)
 
     def cog_unload(self):
         self.check_status_task.cancel()
@@ -75,6 +78,7 @@ class AGSServerStatus(commands.Cog):
           • list        - List all monitored servers.
           • setchannel  - Define the channel for status updates.
           • setmessage  - Set or view a custom status update message.
+          • toggle      - Toggle monitoring on/off.
           • view        - View all current settings.
           • formatting  - Display available placeholders.
           • instructions- Show setup instructions.
@@ -159,11 +163,11 @@ class AGSServerStatus(commands.Cog):
           • "Server {name} is now {status}." 
           • "Alert: {name} (IP: {ip}) switched to {status} at {timestamp} (was {prev_status})."
         
-        To set a custom message, you can either reply to a message containing the text or include it as an argument:
-          [p]serverstatus setmessage online :white_check_mark: {name} is now {status}!
-          [p]serverstatus setmessage offline ⚠️ {name} is now {status} (was {prev_status}).
+        To set a custom message, provide a text argument or reply with one of:
+          [p]serverstatus setmessage online
+          [p]serverstatus setmessage offline
         
-        If no message is provided and you're not replying, the current message (if any) will be displayed.
+        If no message is provided and you're not replying, the current message (if any) is displayed.
         """
         await ctx.send_help(ctx.command)
 
@@ -173,11 +177,8 @@ class AGSServerStatus(commands.Cog):
         Set or view the custom message for when a realm comes online.
         
         Example formatting: "Server {name} is now {status}!" 
-        You can include placeholders such as {name}, {ip}, {port}, {status}, {prev_status}, and {timestamp}.
-        
-        If you reply to a message, that message will be used as the new custom message.
-        Otherwise, if you provide a message as an argument, it will be used.
-        If neither is provided, the current online message is displayed.
+        If you provide a message as an argument or reply with one, it will be saved.
+        If you supply no argument and don't reply, the current custom message is displayed.
         """
         if message_text:
             self.status_messages["online"] = message_text
@@ -205,11 +206,8 @@ class AGSServerStatus(commands.Cog):
         Set or view the custom message for when a realm goes offline.
         
         Example formatting: "Alert: {name} is now {status} (was {prev_status})."
-        You can include placeholders such as {name}, {ip}, {port}, {status}, {prev_status}, and {timestamp}.
-        
-        If you reply to a message, that message will be used as the new custom message.
-        Otherwise, if you provide a message as an argument, it will be used.
-        If neither is provided, the current offline message is displayed.
+        If you provide a message as an argument or reply with one, it will be saved.
+        If you supply no argument and don't reply, the current custom message is displayed.
         """
         if message_text:
             self.status_messages["offline"] = message_text
@@ -230,6 +228,50 @@ class AGSServerStatus(commands.Cog):
                 await ctx.send(f"Current custom message for offline: {current}")
             else:
                 await ctx.send("No custom message set for offline status.")
+
+    @serverstatus.command()
+    async def toggle(self, ctx):
+        """
+        Toggle the server status monitoring on or off.
+        
+        When toggled off, the cog will not check realm status or send update messages.
+        When toggled on, it will immediately send an update for all servers and resume normal operation.
+        """
+        self.active = not self.active
+        await self.config.active.set(self.active)
+        state_str = "enabled" if self.active else "disabled"
+        await ctx.send(f"Server status monitoring has been {state_str}.")
+        if self.active:
+            await self.run_status_update()
+
+    async def run_status_update(self):
+        """Immediately check status for all servers and send updates."""
+        if not self.status_channel:
+            return
+        channel = self.bot.get_channel(self.status_channel)
+        if not channel:
+            return
+        for name, (ip, port, _) in list(self.servers.items()):
+            new_status = await self.is_server_online(ip, port)
+            current_status = "online" if new_status else "offline"
+            # Set previous status as unknown for the immediate update
+            previous_status = "unknown"
+            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            self.servers[name] = (ip, port, new_status)
+            default_message = f"Server {name} is now {current_status}."
+            message_template = self.status_messages.get(current_status, default_message)
+            try:
+                message = message_template.format(
+                    name=name,
+                    ip=ip,
+                    port=port,
+                    status=current_status,
+                    prev_status=previous_status,
+                    timestamp=timestamp
+                )
+            except Exception as e:
+                message = default_message
+            await channel.send(message)
 
     @serverstatus.command()
     async def view(self, ctx):
@@ -364,10 +406,12 @@ class AGSServerStatus(commands.Cog):
         self.servers = {}
         self.status_channel = None
         self.status_messages = {}
+        self.active = True
         # Reset persistent config values.
         await self.config.servers.set({})
         await self.config.status_channel.set(None)
         await self.config.status_messages.set({})
+        await self.config.active.set(True)
         await ctx.send("All settings have been reset.")
 
     @tasks.loop(seconds=60)
@@ -379,6 +423,8 @@ class AGSServerStatus(commands.Cog):
         The custom message (if defined) is processed to replace placeholders:
           {name}, {ip}, {port}, {status}, {prev_status}, {timestamp}
         """
+        if not self.active:
+            return
         if not self.status_channel:
             return
         channel = self.bot.get_channel(self.status_channel)
