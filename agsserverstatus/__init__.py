@@ -1,8 +1,5 @@
 from redbot.core.bot import Red
-from redbot.core.utils.chat_formatting import warning
-import asyncio
-
-from .agsserverstatus import agsserverstatus
+from .agsserverstatus import AGSServerStatus  # Import the class correctly
 
 async def setup(bot: Red):
     cog = AGSServerStatus(bot)
