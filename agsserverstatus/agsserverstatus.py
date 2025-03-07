@@ -1,13 +1,15 @@
 import discord
-from discord.ext import commands, tasks
+from redbot.core import commands, tasks
 import aiohttp
 
-class AGSServerStatus(commands.Cog):  # Ensure it inherits from commands.Cog
+class AGSServerStatus(commands.Cog):
+    """Cog that monitors MMORPG server statuses."""
+    
     def __init__(self, bot):
         self.bot = bot
-        self.servers = {}  # {name: (ip, port, status)}
-        self.status_channel = None
-        self.status_messages = {}  # {status: message}
+        self.servers = {}           # {name: (ip, port, status)}
+        self.status_channel = None  # channel id where status updates will be sent
+        self.status_messages = {}   # {status: message}
         self.check_status_task.start()
 
     def cog_unload(self):
@@ -40,7 +42,9 @@ class AGSServerStatus(commands.Cog):  # Ensure it inherits from commands.Cog
         if not self.servers:
             await ctx.send("No servers are being monitored.")
             return
-        msg = "**Monitored Servers:**\n" + "\n".join(f"`{name}` - `{ip}:{port}`" for name, (ip, port, _) in self.servers.items())
+        msg = "**Monitored Servers:**\n" + "\n".join(
+            f"`{name}` - `{ip}:{port}`" for name, (ip, port, _) in self.servers.items()
+        )
         await ctx.send(msg)
 
     @serverstatus.command()
@@ -51,7 +55,10 @@ class AGSServerStatus(commands.Cog):  # Ensure it inherits from commands.Cog
 
     @serverstatus.command()
     async def setmessage(self, ctx, status: str):
-        """Set a custom message for server status changes. Reply to a message with this command."""
+        """
+        Set a custom message for server status changes.
+        Reply to a message with this command to capture its content.
+        """
         if not ctx.message.reference:
             await ctx.send("Please reply to a message you want to save.")
             return
@@ -61,9 +68,10 @@ class AGSServerStatus(commands.Cog):  # Ensure it inherits from commands.Cog
 
     @tasks.loop(seconds=60)
     async def check_status_task(self):
-        """Periodically checks the status of servers."""
+        """Periodically checks the status of the servers."""
         if not self.status_channel:
             return
+
         channel = self.bot.get_channel(self.status_channel)
         if not channel:
             return
@@ -73,14 +81,15 @@ class AGSServerStatus(commands.Cog):  # Ensure it inherits from commands.Cog
                 try:
                     async with session.get(f"http://{ip}:{port}", timeout=5) as resp:
                         is_online = resp.status == 200
-                except:
+                except Exception:
                     is_online = False
                 
+                # Only send an update if the status has changed (or is unknown yet)
                 if last_status is None or is_online != last_status:
                     self.servers[name] = (ip, port, is_online)
                     message_type = "online" if is_online else "offline"
-                    message = self.status_messages.get(message_type, f"Server `{name}` is now {message_type}.")
+                    message = self.status_messages.get(
+                        message_type,
+                        f"Server `{name}` is now {message_type}."
+                    )
                     await channel.send(message)
-
-async def setup(bot):
-    await bot.add_cog(AGSServerStatus(bot))

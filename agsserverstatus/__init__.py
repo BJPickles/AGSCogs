@@ -1,6 +1,5 @@
-from redbot.core.bot import Red
-from .agsserverstatus import AGSServerStatus  # Ensure correct import
+from redbot.core import commands
+from .agsserverstatus import AGSServerStatus
 
-async def setup(bot: Red):
-    cog = AGSServerStatus(bot)  # Ensure it's an instance of commands.Cog
-    await bot.add_cog(cog)
+async def setup(bot: commands.Bot):
+    await bot.add_cog(AGSServerStatus(bot))
