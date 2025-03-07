@@ -1,4 +1,4 @@
-import discord
+mport discord
 import aiohttp
 import asyncio
 from datetime import datetime
@@ -146,9 +146,24 @@ class AGSServerStatus(commands.Cog):
         """
         Set or view a custom message for status changes.
         
-        Use one of the subcommands below:
-          • online  - for online notifications
-          • offline - for offline notifications
+        When the realm's status changes, the saved message for "online" or "offline" is used.
+        You can use the following placeholders in your message:
+          • {name}        - Realm name
+          • {ip}          - Server IP address
+          • {port}        - Server port
+          • {status}      - New status ("online" or "offline")
+          • {prev_status} - Previous status ("online", "offline", or "unknown")
+          • {timestamp}   - UTC timestamp (YYYY-MM-DD HH:MM:SS UTC)
+        
+        Formatting examples:
+          • "Server {name} is now {status}." 
+          • "Alert: {name} (IP: {ip}) switched to {status} at {timestamp} (was {prev_status})."
+        
+        To set a custom message, reply to the desired message with one of:
+          [p]serverstatus setmessage online
+          [p]serverstatus setmessage offline
+        
+        If you do not reply, the current message (if any) will be displayed.
         """
         await ctx.send_help(ctx.command)
 
@@ -157,8 +172,10 @@ class AGSServerStatus(commands.Cog):
         """
         Set or view the custom message for when a realm comes online.
         
-        If you reply to a message with this command, the replied-to message will be saved as the custom message.
-        If no reply is provided, the current custom message (if any) is displayed.
+        Example formatting: "Server {name} is now {status}!"
+        
+        If you reply to a message with this command, its contents will be saved as the custom online message.
+        If no reply is provided, the current custom message for online status is displayed.
         """
         if ctx.message.reference:
             ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
@@ -179,8 +196,10 @@ class AGSServerStatus(commands.Cog):
         """
         Set or view the custom message for when a realm goes offline.
         
-        If you reply to a message with this command, the replied-to message will be saved as the custom message.
-        If no reply is provided, the current custom message (if any) is displayed.
+        Example formatting: "Alert: {name} is now {status} (was {prev_status})."
+        
+        If you reply to a message with this command, its contents will be saved as the custom offline message.
+        If no reply is provided, the current custom message for offline status is displayed.
         """
         if ctx.message.reference:
             ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
@@ -346,11 +365,9 @@ class AGSServerStatus(commands.Cog):
         """
         if not self.status_channel:
             return
-
         channel = self.bot.get_channel(self.status_channel)
         if not channel:
             return
-
         for name, (ip, port, last_status) in list(self.servers.items()):
             new_status = await self.is_server_online(ip, port)
             if last_status is None or new_status != last_status:
@@ -361,7 +378,6 @@ class AGSServerStatus(commands.Cog):
                 default_message = f"Server {name} is now {current_status}."
                 message_template = self.status_messages.get(current_status, default_message)
                 try:
-                    # Format the custom message with defined placeholders.
                     message = message_template.format(
                         name=name,
                         ip=ip,
@@ -371,6 +387,5 @@ class AGSServerStatus(commands.Cog):
                         timestamp=timestamp
                     )
                 except Exception as e:
-                    # Fallback to default message on formatting error.
                     message = default_message
                 await channel.send(message)
