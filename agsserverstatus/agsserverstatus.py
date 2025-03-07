@@ -75,6 +75,7 @@ class AGSServerStatus(commands.Cog):
           • list        - List all monitored servers.
           • setchannel  - Define the channel for status updates.
           • setmessage  - Set a custom status update message.
+          • view        - View all settings.
           • instructions- Show setup instructions.
           • reset       - Reset (wipe) all settings (bot owner only).
         
@@ -168,6 +169,46 @@ class AGSServerStatus(commands.Cog):
         current_messages[status.lower()] = ref_msg.content
         await self.config.status_messages.set(current_messages)
         await ctx.send(f"Custom message set for '{status}' status.")
+
+    @serverstatus.command()
+    async def view(self, ctx):
+        """
+        View all current settings.
+        
+        This displays:
+          • The designated channel for status updates.
+          • The list of monitored servers (with IP, port, and current status).
+          • Any custom messages that have been set.
+        """
+        embed = discord.Embed(title="AGSServerStatus Settings", color=discord.Color.blue())
+        # Display the status channel
+        if self.status_channel:
+            channel = self.bot.get_channel(self.status_channel)
+            embed.add_field(name="Status Channel", value=channel.mention if channel else f"ID: {self.status_channel}", inline=False)
+        else:
+            embed.add_field(name="Status Channel", value="Not set", inline=False)
+        # Display monitored servers
+        if self.servers:
+            server_lines = []
+            for name, (ip, port, status) in self.servers.items():
+                status_text = "Unknown"
+                if status is True:
+                    status_text = "Online"
+                elif status is False:
+                    status_text = "Offline"
+                server_lines.append(f"**{name}** - {ip}:{port} - {status_text}")
+            embed.add_field(name="Monitored Servers", value="\n".join(server_lines), inline=False)
+        else:
+            embed.add_field(name="Monitored Servers", value="No servers have been added.", inline=False)
+        # Display custom status messages
+        if self.status_messages:
+            message_lines = []
+            for key, msg in self.status_messages.items():
+                message_lines.append(f"**{key.title()}**: {msg}")
+            embed.add_field(name="Custom Status Messages", value="\n".join(message_lines), inline=False)
+        else:
+            embed.add_field(name="Custom Status Messages", value="No custom messages set.", inline=False)
+        await ctx.send(embed=embed)
 
     @serverstatus.group(name="instructions", invoke_without_command=True)
     async def instructions(self, ctx):
