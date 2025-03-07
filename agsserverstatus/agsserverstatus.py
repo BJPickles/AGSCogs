@@ -1,5 +1,6 @@
 import discord
-from redbot.core import commands, tasks
+from redbot.core import commands
+from discord.ext import tasks
 import aiohttp
 
 class AGSServerStatus(commands.Cog):
@@ -8,7 +9,7 @@ class AGSServerStatus(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.servers = {}           # {name: (ip, port, status)}
-        self.status_channel = None  # channel id where status updates will be sent
+        self.status_channel = None  # Channel ID where status updates will be sent.
         self.status_messages = {}   # {status: message}
         self.check_status_task.start()
 
@@ -84,7 +85,6 @@ class AGSServerStatus(commands.Cog):
                 except Exception:
                     is_online = False
                 
-                # Only send an update if the status has changed (or is unknown yet)
                 if last_status is None or is_online != last_status:
                     self.servers[name] = (ip, port, is_online)
                     message_type = "online" if is_online else "offline"
