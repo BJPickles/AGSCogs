@@ -1,4 +1,4 @@
-mport discord
+import discord
 import aiohttp
 import asyncio
 from datetime import datetime
