@@ -1,29 +1,16 @@
 {
-  "author": [
-    "Five"
-  ],
-  "description": "Monitors the status of game servers and posts updates in a Discord channel when their status changes.",
+  "author": ["AGSCogs"],
+  "description": "Monitors multiple game server realms and posts status updates when they go online or offline.",
   "disabled": false,
   "end_user_data_statement": "This cog does not store data about users.",
   "hidden": false,
-  "install_msg": "Thank you for installing AGS Server Status! Use `[p]serverstatus` commands to configure it.",
+  "install_msg": "Thank you for installing AGSServerStatus! Use `[p]serverstatus` to manage monitored servers.",
   "min_bot_version": "3.5.0",
-  "min_python_version": [
-    3,
-    9,
-    1
-  ],
+  "min_python_version": [3, 9, 1],
   "permissions": [],
   "required_cogs": {},
-  "requirements": [
-    "aiohttp"
-  ],
-  "short": "Server status monitoring",
-  "tags": [
-    "server",
-    "status",
-    "monitoring",
-    "alerts"
-  ],
+  "requirements": ["aiohttp"],
+  "short": "Game Server Status Monitoring",
+  "tags": ["utility", "server", "status", "monitoring"],
   "type": "COG"
 }

@@ -1,16 +1,15 @@
 import discord
 from discord.ext import commands, tasks
-import asyncio
 import aiohttp
 
-class AGSServerStatus(commands.Cog):
+class AGSServerStatus(commands.Cog):  # Ensure it inherits from commands.Cog
     def __init__(self, bot):
         self.bot = bot
         self.servers = {}  # {name: (ip, port, status)}
         self.status_channel = None
         self.status_messages = {}  # {status: message}
         self.check_status_task.start()
-    
+
     def cog_unload(self):
         self.check_status_task.cancel()
 
