@@ -1,0 +1,29 @@
+{
+  "author": [
+    "Five"
+  ],
+  "description": "Monitors the status of game servers and posts updates in a Discord channel when their status changes.",
+  "disabled": false,
+  "end_user_data_statement": "This cog does not store data about users.",
+  "hidden": false,
+  "install_msg": "Thank you for installing AGS Server Status! Use `[p]serverstatus` commands to configure it.",
+  "min_bot_version": "3.5.0",
+  "min_python_version": [
+    3,
+    9,
+    1
+  ],
+  "permissions": [],
+  "required_cogs": {},
+  "requirements": [
+    "aiohttp"
+  ],
+  "short": "Server status monitoring",
+  "tags": [
+    "server",
+    "status",
+    "monitoring",
+    "alerts"
+  ],
+  "type": "COG"
+}
