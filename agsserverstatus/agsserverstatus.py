@@ -298,7 +298,7 @@ class AGSServerStatus(commands.Cog):
             await self.run_status_update()
 
     async def run_status_update(self):
-        """Immediately check status for all servers and send updates."""
+        """Immediately check status for all servers (only enabled realms) and send updates."""
         if not self.status_channel:
             return
         channel = self.bot.get_channel(self.status_channel)
@@ -331,18 +331,21 @@ class AGSServerStatus(commands.Cog):
         View all current settings.
         
         This displays:
+          • The overall monitoring state.
           • The designated channel for status updates.
           • The list of monitored servers (with IP, port, current status, and whether monitoring is enabled).
           • Any custom messages that have been set.
         """
         embed = discord.Embed(title="AGSServerStatus Settings", color=discord.Color.blue())
-        # Display the status channel.
+        # Overall monitoring
+        embed.add_field(name="Overall Monitoring", value="Enabled" if self.active else "Disabled", inline=False)
+        # Status channel.
         if self.status_channel:
             channel = self.bot.get_channel(self.status_channel)
             embed.add_field(name="Status Channel", value=channel.mention if channel else f"ID: {self.status_channel}", inline=False)
         else:
             embed.add_field(name="Status Channel", value="Not set", inline=False)
-        # Display monitored servers.
+        # Monitored servers.
         if self.servers:
             server_lines = []
             for name, (ip, port, status, enabled) in self.servers.items():
@@ -355,7 +358,7 @@ class AGSServerStatus(commands.Cog):
             embed.add_field(name="Monitored Servers", value="\n".join(server_lines), inline=False)
         else:
             embed.add_field(name="Monitored Servers", value="No servers have been added.", inline=False)
-        # Display custom status messages.
+        # Custom status messages.
         if self.status_messages:
             message_lines = []
             for key, msg in self.status_messages.items():
