@@ -43,6 +43,12 @@ class AGSServerStatus(commands.Cog):
         # Start the periodic status-check loop.
         self.check_status_task.start()
 
+    @tasks.loop(minutes=1)
+    async def check_status_task(self):
+        """Periodic task that performs a status update for all enabled servers."""
+        if self.active:
+            await self.run_status_update()
+
     async def initialize_settings(self):
         data = await self.config.all()
         servers = data.get("servers", {})
