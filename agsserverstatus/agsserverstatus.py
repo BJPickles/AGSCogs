@@ -39,7 +39,7 @@ class AGSServerStatus(commands.Cog):
         self.status_channel: Optional[int] = None
         self.status_messages: dict[str, str] = {}
         self.active: bool = True
-        # To track the last update message (per realm) so it can be deleted.
+        # To track the last update message (per realm) so it can be updated.
         self.last_messages: dict[str, int] = {}
         # Create a persistent aiohttp session
         self.session = aiohttp.ClientSession()
@@ -96,14 +96,17 @@ class AGSServerStatus(commands.Cog):
 
     async def _send_status_update(self, realm: str, channel: discord.TextChannel, content: str) -> None:
         """
-        Sends a status update message while deleting the previous one (if any) for the same realm.
+        Sends a status update message. If there was a previous message for the realm,
+        it attempts to edit that message with the new content. If editing fails (e.g., message not found),
+        it falls back to sending a new message.
         """
         if realm in self.last_messages:
             try:
                 old_msg = await channel.fetch_message(self.last_messages[realm])
-                await old_msg.delete()
+                await old_msg.edit(content=content)
+                return
             except Exception as e:
-                logger.debug("Failed to delete previous message for %s: %s", realm, e)
+                logger.debug("Failed to edit previous message for %s: %s", realm, e)
         try:
             new_msg = await channel.send(content)
             self.last_messages[realm] = new_msg.id
