@@ -13,39 +13,38 @@ class AGSServerStatus(commands.Cog):
     """Cog that monitors MMORPG server statuses using a REST health-check endpoint.
     
     Custom placeholders available in messages:
-      • {name}        – Realm name
-      • {ip}          – Server IP address
-      • {port}        – Server port number
-      • {status}      – New status ("online" or "offline")
-      • {prev_status} – Previous status ("online", "offline", or "unknown")
-      • {timestamp}   – UTC time (YYYY-MM-DD HH:MM:SS UTC)
+      • {name}             – Realm name
+      • {ip}               – Server IP address
+      • {port}             – Server port number
+      • {status}           – New status ("online" or "offline")
+      • {prev_status}      – Previous status ("online", "offline", or "unknown")
+      • {timestamp}        – UTC time (YYYY-MM-DD HH:MM:SS UTC)
+      • {discord_short}    – Discord short timestamp (e.g. <t:1743632040:t>)
+      • {discord_relative} – Discord relative timestamp (e.g. <t:1743632040:R>)
       
     NOTE: All settings are saved persistently.
     """
-
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        # Set up persistent config with a unique identifier.
-        self.config = Config.get_conf(self, identifier=123456789012345678, force_registration=True)
+        # Include "last_messages" in the default global config so message IDs are persisted.
         default_global = {
             "servers": {},          # {name: {"ip": ip, "port": port, "enabled": bool, "last_status": bool or None}}
             "status_channel": None, # Stored as channel ID
             "status_messages": {},  # { "online": message, "offline": message }
-            "active": True          # Overall toggle
+            "active": True,         # Overall toggle
+            "last_messages": {}     # Persisted mapping of realm -> message ID
         }
+        self.config = Config.get_conf(self, identifier=123456789012345678, force_registration=True)
         self.config.register_global(**default_global)
-        # In-memory storage: a server is represented as a tuple: (ip, port, last_status, enabled)
+        # In-memory storage.
         self.servers: dict[str, tuple[str, int, Optional[bool], bool]] = {}
         self.status_channel: Optional[int] = None
         self.status_messages: dict[str, str] = {}
         self.active: bool = True
-        # To track the last update message (per realm) so it can be updated.
+        # To track the last update message (per realm) so it can be updated – now persisted.
         self.last_messages: dict[str, int] = {}
-        # Create a persistent aiohttp session
         self.session = aiohttp.ClientSession()
-        # Load persistent settings
         self.bot.loop.create_task(self.initialize_settings())
-        # Start the periodic status-check task
         self.check_status_task.start()
 
     async def initialize_settings(self) -> None:
@@ -60,12 +59,12 @@ class AGSServerStatus(commands.Cog):
         self.status_channel = data.get("status_channel")
         self.status_messages = data.get("status_messages", {})
         self.active = data.get("active", True)
+        self.last_messages = data.get("last_messages", {})
         logger.info("Initialized settings for AGSServerStatus.")
 
     def cog_unload(self) -> None:
         self.check_status_task.cancel()
         if not self.session.closed:
-            # Schedule session close on unload.
             self.bot.loop.create_task(self.session.close())
         logger.info("Cog unloaded: session closed and task cancelled.")
 
@@ -96,26 +95,29 @@ class AGSServerStatus(commands.Cog):
 
     async def _send_status_update(self, realm: str, channel: discord.TextChannel, content: str) -> None:
         """
-        Sends a status update message. If there was a previous message for the realm,
-        it attempts to edit that message with the new content. If editing fails (e.g., message not found),
-        it falls back to sending a new message.
+        Sends a status update message.
+        If a previous message for the realm exists, attempts to edit it.
+        If the message does not exist or editing fails, sends a new one
+        and updates the persisted message ID.
         """
         if realm in self.last_messages:
             try:
                 old_msg = await channel.fetch_message(self.last_messages[realm])
                 await old_msg.edit(content=content)
                 return
-            except Exception as e:
-                logger.debug("Failed to edit previous message for %s: %s", realm, e)
+            except (discord.NotFound, discord.HTTPException) as e:
+                logger.debug("Previous message for %s not found or not editable: %s", realm, e)
         try:
             new_msg = await channel.send(content)
             self.last_messages[realm] = new_msg.id
+            await self.config.last_messages.set(self.last_messages)
         except Exception as e:
             logger.error("Failed to send status update for %s: %s", realm, e)
 
     def _validate_format(self, message_text: str) -> bool:
         """
         Validates the custom message using dummy placeholder values.
+        Includes the new Discord timestamp placeholders.
         """
         try:
             message_text.format(
@@ -124,7 +126,9 @@ class AGSServerStatus(commands.Cog):
                 port=1234,
                 status="online",
                 prev_status="offline",
-                timestamp="2023-01-01 00:00:00 UTC"
+                timestamp="2023-01-01 00:00:00 UTC",
+                discord_short="<t:1234567890:t>",
+                discord_relative="<t:1234567890:R>"
             )
             return True
         except Exception as e:
@@ -133,11 +137,10 @@ class AGSServerStatus(commands.Cog):
 
     async def _set_custom_message(self, kind: str, message_text: Optional[str], ctx: commands.Context) -> None:
         """
-        Helper function to set or view a custom message for the given kind ("online" or "offline").
-        If a message_text is provided, its formatting is validated before saving.
+        Set or view a custom message for the given kind ("online" or "offline").
+        Validates the formatting before saving.
         """
         if message_text:
-            # Validate formatting.
             if not self._validate_format(message_text):
                 await ctx.send("The provided message formatting is invalid. Please check your placeholders.")
                 return
@@ -171,7 +174,6 @@ class AGSServerStatus(commands.Cog):
     async def serverstatus(self, ctx: commands.Context) -> None:
         """
         Manage the monitoring of game servers.
-        
         Subcommands include: add, remove, list, togglerealm, setchannel, setmessage, toggle, view, formatting,
         instructions, and reset.
         """
@@ -182,7 +184,6 @@ class AGSServerStatus(commands.Cog):
     async def add(self, ctx: commands.Context, name: str, ip: str, port: int) -> None:
         """
         Add a server to monitor.
-        
         Examples:
           [p]serverstatus add Avalon 192.168.1.1 5757
           [p]serverstatus add "Public Test Realm" 192.168.1.2 5757
@@ -202,6 +203,7 @@ class AGSServerStatus(commands.Cog):
             del self.servers[name]
             if name in self.last_messages:
                 del self.last_messages[name]
+                await self.config.last_messages.set(self.last_messages)
             current_servers = await self.config.servers()
             if name in current_servers:
                 del current_servers[name]
@@ -233,7 +235,6 @@ class AGSServerStatus(commands.Cog):
     async def togglerealm(self, ctx: commands.Context, name: str, state: Optional[str] = None) -> None:
         """
         Toggle monitoring on or off for an individual realm.
-        
         Usage: [p]serverstatus togglerealm <realm name> [on/off]
         Without an on/off argument, the current state will be toggled.
         """
@@ -258,14 +259,19 @@ class AGSServerStatus(commands.Cog):
         await ctx.send(f"Monitoring for server {name} is now {'enabled' if new_enabled else 'disabled'}.")
         logger.info("Toggled realm %s to %s", name, "enabled" if new_enabled else "disabled")
         
+        # If we're enabling monitoring and have a designated channel:
         if new_enabled and self.status_channel:
             new_status_bool = await self.is_server_online(ip, port)
             if last_status is not None and new_status_bool == last_status:
                 return
             current_status = "online" if new_status_bool else "offline"
             prev_status = "unknown" if last_status is None else ("online" if last_status else "offline")
-            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-            default_message = f"Server {name} is now {current_status}."
+            now = datetime.utcnow()
+            ts = int(now.timestamp())
+            timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+            discord_short = f"<t:{ts}:t>"
+            discord_relative = f"<t:{ts}:R>"
+            default_message = f"Server {name} is now {current_status}. {discord_short} {discord_relative}"
             message_template = self.status_messages.get(current_status, default_message)
             try:
                 message = message_template.format(
@@ -274,7 +280,9 @@ class AGSServerStatus(commands.Cog):
                     port=port,
                     status=current_status,
                     prev_status=prev_status,
-                    timestamp=timestamp
+                    timestamp=timestamp_str,
+                    discord_short=discord_short,
+                    discord_relative=discord_relative,
                 )
             except Exception as e:
                 logger.error("Error formatting message for %s: %s", name, e)
@@ -301,31 +309,28 @@ class AGSServerStatus(commands.Cog):
     async def setmessage(self, ctx: commands.Context) -> None:
         """
         Set or view a custom message for status changes.
-        
-        Custom messages can include these placeholders:
-          • {name}        - Realm name
-          • {ip}          - Server IP address
-          • {port}        - Server port number
-          • {status}      - New status ("online" or "offline")
-          • {prev_status} - Previous status ("online", "offline", or "unknown")
-          • {timestamp}   - UTC timestamp (YYYY-MM-DD HH:MM:SS UTC)
+        Custom messages can include:
+          • {name}             - Realm name
+          • {ip}               - Server IP address
+          • {port}             - Server port number
+          • {status}           - New status ("online" or "offline")
+          • {prev_status}      - Previous status ("online", "offline", or "unknown")
+          • {timestamp}        - UTC timestamp (YYYY-MM-DD HH:MM:SS UTC)
+          • {discord_short}    - Discord short timestamp, e.g., <t:1743632040:t>
+          • {discord_relative} - Discord relative timestamp, e.g., <t:1743632040:R>
         """
         await ctx.send_help(ctx.command)
 
     @setmessage.command(name="online")
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def setmessage_online(self, ctx: commands.Context, *, message_text: Optional[str] = None) -> None:
-        """
-        Set or view the custom message for when a realm comes online.
-        """
+        """Set or view the custom message for when a realm comes online."""
         await self._set_custom_message("online", message_text, ctx)
 
     @setmessage.command(name="offline")
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def setmessage_offline(self, ctx: commands.Context, *, message_text: Optional[str] = None) -> None:
-        """
-        Set or view the custom message for when a realm goes offline.
-        """
+        """Set or view the custom message for when a realm goes offline."""
         await self._set_custom_message("offline", message_text, ctx)
 
     @serverstatus.command()
@@ -360,8 +365,12 @@ class AGSServerStatus(commands.Cog):
             if last_status is None or new_status != last_status:
                 current_status = "online" if new_status else "offline"
                 previous_status = "unknown" if last_status is None else ("online" if last_status else "offline")
-                timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-                default_message = f"Server {name} is now {current_status}."
+                now = datetime.utcnow()
+                ts = int(now.timestamp())
+                timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+                discord_short = f"<t:{ts}:t>"
+                discord_relative = f"<t:{ts}:R>"
+                default_message = f"Server {name} is now {current_status}. {discord_short} {discord_relative}"
                 message_template = self.status_messages.get(current_status, default_message)
                 try:
                     message = message_template.format(
@@ -370,7 +379,9 @@ class AGSServerStatus(commands.Cog):
                         port=port,
                         status=current_status,
                         prev_status=previous_status,
-                        timestamp=timestamp
+                        timestamp=timestamp_str,
+                        discord_short=discord_short,
+                        discord_relative=discord_relative,
                     )
                 except Exception as e:
                     logger.error("Error formatting message for %s: %s", name, e)
@@ -429,7 +440,9 @@ class AGSServerStatus(commands.Cog):
             "**{port}** - Server port number\n"
             "**{status}** - New status (\"online\" or \"offline\")\n"
             "**{prev_status}** - Previous status (\"online\", \"offline\", or \"unknown\")\n"
-            "**{timestamp}** - UTC timestamp (YYYY-MM-DD HH:MM:SS UTC)"
+            "**{timestamp}** - UTC timestamp (YYYY-MM-DD HH:MM:SS UTC)\n"
+            "**{discord_short}** - Discord short timestamp (e.g. <t:1743632040:t>)\n"
+            "**{discord_relative}** - Discord relative timestamp (e.g. <t:1743632040:R>)"
         )
         await ctx.send(message)
 
@@ -475,10 +488,11 @@ class AGSServerStatus(commands.Cog):
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def reset(self, ctx: commands.Context) -> None:
         """
-        Reset (wipe) all settings. This will delete all servers, custom messages, and the set channel.
-        To confirm, you must type "I agree" within 60 seconds.
+        Reset (wipe) all settings. This will delete all servers, custom messages, the set channel,
+        and the persisted message IDs.
+        To confirm, type "I agree" within 60 seconds.
         """
-        await ctx.send("WARNING: This will wipe ALL settings including servers, custom messages, and the set channel. "
+        await ctx.send("WARNING: This will wipe ALL settings including servers, custom messages, the set channel, and previous message IDs. "
                        "Type 'I agree' within 60 seconds to confirm.")
         try:
             def check(m: discord.Message) -> bool:
@@ -495,6 +509,7 @@ class AGSServerStatus(commands.Cog):
         await self.config.status_channel.set(None)
         await self.config.status_messages.set({})
         await self.config.active.set(True)
+        await self.config.last_messages.set({})
         await ctx.send("All settings have been reset.")
         logger.info("All settings have been reset by %s", ctx.author)
 
