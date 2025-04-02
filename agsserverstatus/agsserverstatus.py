@@ -18,7 +18,7 @@ class AGSServerStatus(commands.Cog):
       • {port}             – Server port number
       • {status}           – New status ("online" or "offline")
       • {prev_status}      – Previous status ("online", "offline", or "unknown")
-      • {timestamp}        – UTC time (YYYY-MM-DD HH:MM:SS UTC)
+      • {timestamp}        – Local time (YYYY-MM-DD HH:MM:SS)
       • {discord_short}    – Discord short timestamp (e.g. <t:1743632040:t>)
       • {discord_relative} – Discord relative timestamp (e.g. <t:1743632040:R>)
       
@@ -126,7 +126,7 @@ class AGSServerStatus(commands.Cog):
                 port=1234,
                 status="online",
                 prev_status="offline",
-                timestamp="2023-01-01 00:00:00 UTC",
+                timestamp="2023-01-01 00:00:00",
                 discord_short="<t:1234567890:t>",
                 discord_relative="<t:1234567890:R>"
             )
@@ -259,16 +259,15 @@ class AGSServerStatus(commands.Cog):
         await ctx.send(f"Monitoring for server {name} is now {'enabled' if new_enabled else 'disabled'}.")
         logger.info("Toggled realm %s to %s", name, "enabled" if new_enabled else "disabled")
         
-        # If we're enabling monitoring and have a designated channel:
         if new_enabled and self.status_channel:
             new_status_bool = await self.is_server_online(ip, port)
             if last_status is not None and new_status_bool == last_status:
                 return
             current_status = "online" if new_status_bool else "offline"
             prev_status = "unknown" if last_status is None else ("online" if last_status else "offline")
-            now = datetime.utcnow()
+            now = datetime.now()  # Use local time now instead of UTC
             ts = int(now.timestamp())
-            timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+            timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S")
             discord_short = f"<t:{ts}:t>"
             discord_relative = f"<t:{ts}:R>"
             default_message = f"Server {name} is now {current_status}. {discord_short} {discord_relative}"
@@ -315,7 +314,7 @@ class AGSServerStatus(commands.Cog):
           • {port}             - Server port number
           • {status}           - New status ("online" or "offline")
           • {prev_status}      - Previous status ("online", "offline", or "unknown")
-          • {timestamp}        - UTC timestamp (YYYY-MM-DD HH:MM:SS UTC)
+          • {timestamp}        - Local timestamp (YYYY-MM-DD HH:MM:SS)
           • {discord_short}    - Discord short timestamp, e.g., <t:1743632040:t>
           • {discord_relative} - Discord relative timestamp, e.g., <t:1743632040:R>
         """
@@ -365,9 +364,9 @@ class AGSServerStatus(commands.Cog):
             if last_status is None or new_status != last_status:
                 current_status = "online" if new_status else "offline"
                 previous_status = "unknown" if last_status is None else ("online" if last_status else "offline")
-                now = datetime.utcnow()
+                now = datetime.now()  # Use local time now
                 ts = int(now.timestamp())
-                timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+                timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S")
                 discord_short = f"<t:{ts}:t>"
                 discord_relative = f"<t:{ts}:R>"
                 default_message = f"Server {name} is now {current_status}. {discord_short} {discord_relative}"
@@ -440,7 +439,7 @@ class AGSServerStatus(commands.Cog):
             "**{port}** - Server port number\n"
             "**{status}** - New status (\"online\" or \"offline\")\n"
             "**{prev_status}** - Previous status (\"online\", \"offline\", or \"unknown\")\n"
-            "**{timestamp}** - UTC timestamp (YYYY-MM-DD HH:MM:SS UTC)\n"
+            "**{timestamp}** - Local timestamp (YYYY-MM-DD HH:MM:SS)\n"
             "**{discord_short}** - Discord short timestamp (e.g. <t:1743632040:t>)\n"
             "**{discord_relative}** - Discord relative timestamp (e.g. <t:1743632040:R>)"
         )
