@@ -7,10 +7,9 @@ import time
 from datetime import datetime
 
 import discord
-from discord.ext import commands
 from discord.ui import View, Button, Modal, TextInput
 
-from redbot.core import Config, checks
+from redbot.core import Config, checks, commands
 from redbot.core.bot import Red
 from redbot.core.utils.chat_formatting import humanize_list
 
@@ -421,7 +420,7 @@ class Activities(commands.Cog):
     async def atype_setdefault(self, ctx, name: str, channel: discord.TextChannel):
         """Set the default channel where embeds will be posted."""
         key = name.lower()
-        types = await self.config.guild(ctx.guild).activity_types()
+        types = await self.config guild(ctx.guild).activity_types()
         conf = types.get(key)
         if not conf:
             return await ctx.send(f"No type `{key}`.")
@@ -1045,5 +1044,5 @@ class Activities(commands.Cog):
         await ctx.send("Prune summary channel cleared.")
 
 
-def setup(bot):
-    bot.add_cog(Activities(bot))
+async def setup(bot: Red):
+    await bot.add_cog(Activities(bot))
