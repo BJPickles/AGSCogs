@@ -420,7 +420,7 @@ class Activities(commands.Cog):
     async def atype_setdefault(self, ctx, name: str, channel: discord.TextChannel):
         """Set the default channel where embeds will be posted."""
         key = name.lower()
-        types = await self.config guild(ctx.guild).activity_types()
+        types = await self.config.guild(ctx.guild).activity_types()
         conf = types.get(key)
         if not conf:
             return await ctx.send(f"No type `{key}`.")
