@@ -1,0 +1,16 @@
+{
+  "author": ["AGSCogs"],
+  "description": "Fully featured activity‐management cog: define types, JSON‐templated embeds, join buttons, DM invites, voice‐call checks, games, hangouts, persistence, and more.",
+  "disabled": false,
+  "end_user_data_statement": "Stores only activity definitions and instance state; no sensitive personal data.",
+  "hidden": false,
+  "install_msg": "Thank you for installing AGSActivities! Use `[p]activitytype` to define types and `[p]activity` to start or manage activities.",
+  "min_bot_version": "3.5.0",
+  "min_python_version": [3, 9, 1],
+  "permissions": [],
+  "required_cogs": {},
+  "requirements": [],
+  "short": "Activity management",
+  "tags": ["activity", "games", "voice", "utility"],
+  "type": "COG"
+}
