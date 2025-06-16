@@ -20,25 +20,18 @@ log = logging.getLogger("red.agsactivities")
 # Config defaults
 # ----------------------------------------------------------------------------
 DEFAULT_GUILD = {
-    # activity_types: name → { default_channel, embed_template, tags }
     "activity_types": {},
-    # activity_instances: uuid → { guild_id, type_name, owner_id, embed_channel_id,
-    # voice_channel_id, embed_message_id, status, tag_values,
-    # participants, max_slots, owner_message, use_dm,
-    # dm_targets, dm_message_ids, created_at }
     "activity_instances": {},
-    # Channel for monthly prune summaries
     "prune_summary_channel": None,
 }
 
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
-# Max length for tag inputs
-MAX_TAG_LENGTH = 200
+MAX_TAG_LENGTH = 200  # max length for each tag input
 
 # ----------------------------------------------------------------------------
-# Button & UI Classes
+# UI Components
 # ----------------------------------------------------------------------------
 class JoinButton(Button):
     def __init__(self, iid: str):
@@ -106,7 +99,6 @@ class ReplyButton(Button):
         self.instance_id = iid
 
     async def callback(self, interaction: discord.Interaction):
-        # Present a modal for a custom text response
         await interaction.response.send_modal(
             ResponseModal(
                 cog=self.view.cog,
@@ -132,11 +124,9 @@ class ResponseModal(Modal):
         self.add_item(self.response)
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Acknowledge receipt
         await interaction.response.send_message(
             "Your message has been sent to the activity owner.", ephemeral=True
         )
-        # Forward to owner
         await self.cog._handle_response(
             interaction, self.instance_id, self.target_user_id, self.response.value
         )
@@ -170,6 +160,7 @@ class Activities(commands.Cog):
     AGS Activities Cog
     Fully‐featured, JSON‐templated, button‐driven activity system
     with:
+      • one-command bootstrap of default types
       • per-instance channel override
       • tag input length enforcement
       • DM invite accept/decline/reply via modal
@@ -188,7 +179,7 @@ class Activities(commands.Cog):
         self.bot.loop.create_task(self._prune_scheduler())
 
     async def _register_persistent_views(self):
-        """After a restart re‐add all persistent Views so buttons keep working."""
+        """After restart re-add all Views so buttons keep working."""
         await self.bot.wait_until_ready()
         for guild in self.bot.guilds:
             insts = await self.config.guild(guild).activity_instances()
@@ -204,17 +195,14 @@ class Activities(commands.Cog):
                     self.bot.add_view(ActivityDMView(self, iid, uid), message_id=dm_mid)
 
     def cog_unload(self):
-        # Clean up Views
         self.bot.remove_view(ActivityPublicView(self, ""))
         self.bot.remove_view(ActivityDMView(self, "", 0))
 
     # ----------------------------
-    # Placeholder Matching & Embed
+    # Helpers
     # ----------------------------
     def _match_instance_id(self, insts: dict, query: str) -> str:
-        """Find full UUID from a prefix, or return None/'AMBIG'."""
-        lower = query.lower()
-        matches = [iid for iid in insts if iid.startswith(lower)]
+        matches = [iid for iid in insts if iid.startswith(query.lower())]
         if not matches:
             return None
         if len(matches) > 1:
@@ -222,15 +210,12 @@ class Activities(commands.Cog):
         return matches[0]
 
     async def _render_embed(self, guild: discord.Guild, iid: str, inst: dict) -> discord.Embed:
-        """
-        Load the type's JSON template, replace [placeholders], and return an Embed.
-        """
         types = await self.config.guild(guild).activity_types()
         tconf = types.get(inst["type_name"], {})
         template = tconf.get("embed_template")
         if not template:
             return discord.Embed(
-                title=f"{inst['type_name'].title()}",
+                title=inst["type_name"].title(),
                 description="*(no template configured)*",
                 color=discord.Color.red(),
             )
@@ -445,6 +430,68 @@ class Activities(commands.Cog):
         await self.config.guild(ctx.guild).activity_types.set(types)
         await ctx.send(f"Default channel for `{key}` is now {channel.mention}.")
 
+    @activitytype.command(name="init")
+    @checks.guildowner()
+    async def atype_init(self, ctx):
+        """
+        Bootstrap default activity types in one command:
+          • hangout
+          • voicecall-public
+          • voicecall-private
+        """
+        types = await self.config.guild(ctx.guild).activity_types()
+        created = []
+
+        # Hangout
+        if "hangout" not in types:
+            hangout_template = {
+                "title": "[activity.owner] started a hangout!",
+                "description": "[custom_message]",
+                "color": 3447003
+            }
+            types["hangout"] = {
+                "default_channel": ctx.channel.id,
+                "embed_template": hangout_template,
+                "tags": {}
+            }
+            created.append("hangout")
+
+        # Voicecall-Public
+        if "voicecall-public" not in types:
+            vc_pub_template = {
+                "title": "[activity.owner] started a public voice call!",
+                "description": "[custom_message]\nSlots: [slots.current]/[slots.max]",
+                "color": 10181046
+            }
+            types["voicecall-public"] = {
+                "default_channel": ctx.channel.id,
+                "embed_template": vc_pub_template,
+                "tags": {}
+            }
+            created.append("voicecall-public")
+
+        # Voicecall-Private
+        if "voicecall-private" not in types:
+            vc_priv_template = {
+                "title": "[activity.owner] started a private voice call!",
+                "description": "[custom_message]\nSlots: [slots.current]/[slots.max]",
+                "color": 10038562
+            }
+            types["voicecall-private"] = {
+                "default_channel": ctx.channel.id,
+                "embed_template": vc_priv_template,
+                "tags": {}
+            }
+            created.append("voicecall-private")
+
+        if not created:
+            return await ctx.send("All default activity types already exist.")
+        await self.config.guild(ctx.guild).activity_types.set(types)
+        await ctx.send(
+            f"Created default types: {', '.join(created)}.\n"
+            "You can customize their templates/tags with `!activitytype embed upload` and `!activitytype tag`."
+        )
+
     # ----------------------------
     # User: activity group
     # ----------------------------
@@ -503,18 +550,16 @@ class Activities(commands.Cog):
     async def activity_start(self, ctx, name: str, channel: discord.TextChannel = None):
         """
         Start a new activity.
-        Optional override: specify a text channel to post the embed publicly.
+        Optional: specify a channel override for the public embed.
         """
         key = name.lower()
         types = await self.config.guild(ctx.guild).activity_types()
         tconf = types.get(key)
         if not tconf:
             return await ctx.send(f"No activity type `{key}` defined.")
-        # Determine embed channel (allow per-instance override)
         dc = tconf.get("default_channel")
         embed_chan = channel or (ctx.guild.get_channel(dc) if dc else ctx.channel)
 
-        # Voice‐call logic
         is_pub = key == "voicecall-public"
         is_priv = key == "voicecall-private"
         voice_chan = None
@@ -546,7 +591,6 @@ class Activities(commands.Cog):
             if is_priv and (perms.view_channel and perms.connect):
                 return await ctx.send("That channel is not private.")
 
-        # DM‐only?
         await ctx.send("Send invites via DM only? (yes/no)")
         try:
             dm_reply = await self.bot.wait_for(
@@ -558,14 +602,12 @@ class Activities(commands.Cog):
         except asyncio.TimeoutError:
             return await ctx.send("Timed out.")
 
-        # Collect tag values with max-length enforcement
         tag_defs = tconf.get("tags", {})
         tag_vals = {}
         for tag, opts in tag_defs.items():
             if opts["mandatory"]:
-                # mandatory: keep prompting until valid
                 while True:
-                    await ctx.send(f"Please provide **{tag}** ({opts['description']}, max {MAX_TAG_LENGTH} chars):")
+                    await ctx.send(f"Provide **{tag}** ({opts['description']}, max {MAX_TAG_LENGTH} chars):")
                     try:
                         m = await self.bot.wait_for(
                             "message",
@@ -576,7 +618,7 @@ class Activities(commands.Cog):
                         return await ctx.send("Timed out.")
                     val = m.content.strip()
                     if len(val) > MAX_TAG_LENGTH:
-                        await ctx.send(f"Too long ({len(val)}/{MAX_TAG_LENGTH}). Please try again.")
+                        await ctx.send(f"Too long ({len(val)}/{MAX_TAG_LENGTH}). Try again.")
                         continue
                     tag_vals[tag] = val
                     break
@@ -592,7 +634,7 @@ class Activities(commands.Cog):
                     return await ctx.send("Timed out.")
                 if m.content.lower().startswith("y"):
                     while True:
-                        await ctx.send(f"Please provide **{tag}** ({opts['description']}, max {MAX_TAG_LENGTH} chars):")
+                        await ctx.send(f"Provide **{tag}** ({opts['description']}, max {MAX_TAG_LENGTH} chars):")
                         try:
                             v = await self.bot.wait_for(
                                 "message",
@@ -603,12 +645,11 @@ class Activities(commands.Cog):
                             return await ctx.send("Timed out.")
                         val = v.content.strip()
                         if len(val) > MAX_TAG_LENGTH:
-                            await ctx.send(f"Too long ({len(val)}/{MAX_TAG_LENGTH}). Please try again.")
+                            await ctx.send(f"Too long ({len(val)}/{MAX_TAG_LENGTH}). Try again.")
                             continue
                         tag_vals[tag] = val
                         break
 
-        # Optional owner message
         await ctx.send("Optional short message (<500 chars), or `skip`:")
         try:
             m = await self.bot.wait_for(
@@ -620,7 +661,6 @@ class Activities(commands.Cog):
         except asyncio.TimeoutError:
             return await ctx.send("Timed out.")
 
-        # DM target collection
         dm_targets = []
         if use_dm:
             await ctx.send("Mention users to DM, or `all` to DM channel members:")
@@ -663,7 +703,6 @@ class Activities(commands.Cog):
         insts[iid] = inst
         await self.config.guild(ctx.guild).activity_instances.set(insts)
 
-        # Post embed & views
         if not use_dm:
             e = await self._render_embed(ctx.guild, iid, inst)
             view = ActivityPublicView(self, iid)
@@ -690,13 +729,13 @@ class Activities(commands.Cog):
             await ctx.send(f"Sent DM invites for activity `{iid[:8]}`.")
 
     # ----------------------------
-    # Button callbacks
+    # Button Callbacks
     # ----------------------------
     async def _handle_join(self, interaction: discord.Interaction, iid: str):
         guild = interaction.guild
         if not guild:
             return await interaction.response.send_message(
-                "This must be used in‐guild.", ephemeral=True
+                "This must be used in-guild.", ephemeral=True
             )
         insts = await self.config.guild(guild).activity_instances()
         inst = insts.get(iid)
@@ -726,7 +765,6 @@ class Activities(commands.Cog):
             await vc.set_permissions(interaction.user, view_channel=True, connect=True)
         insts[iid] = inst
         await self.config.guild(guild).activity_instances.set(insts)
-        # Edit embed
         ch = guild.get_channel(inst["embed_channel_id"])
         try:
             msg = await ch.fetch_message(inst["embed_message_id"])
@@ -740,7 +778,7 @@ class Activities(commands.Cog):
         guild = interaction.guild
         if not guild:
             return await interaction.response.send_message(
-                "This must be used in‐guild.", ephemeral=True
+                "This must be used in-guild.", ephemeral=True
             )
         insts = await self.config.guild(guild).activity_instances()
         inst = insts.get(iid)
@@ -758,7 +796,6 @@ class Activities(commands.Cog):
             inst["status"] = "OPEN"
         insts[iid] = inst
         await self.config.guild(guild).activity_instances.set(insts)
-        # Edit embed
         ch = guild.get_channel(inst["embed_channel_id"])
         try:
             msg = await ch.fetch_message(inst["embed_message_id"])
@@ -831,15 +868,11 @@ class Activities(commands.Cog):
             pass
         await interaction.response.send_message("You declined.", ephemeral=True)
 
-    # ----------------------------
-    # New: handle text response from modal
-    # ----------------------------
     async def _handle_response(
         self, interaction: discord.Interaction, iid: str, target_user_id: int, content: str
     ):
         """
-        Called when a user submits the Reply modal.
-        Sends their custom message to the activity owner via DM.
+        Forward a custom text response (from Reply modal) to the activity owner.
         """
         inst = None
         owner = None
@@ -929,10 +962,6 @@ class Activities(commands.Cog):
     # Prune functionality
     # ----------------------------
     async def _prune_guild(self, guild: discord.Guild, status: str = "ENDED", older_than: int = None):
-        """
-        Internal helper: remove instances matching `status` and optional age in days.
-        Returns a list of (iid, inst) pruned.
-        """
         insts = await self.config.guild(guild).activity_instances()
         now_ts = time.time()
         to_remove = {}
@@ -962,14 +991,9 @@ class Activities(commands.Cog):
         return list(to_remove.items())
 
     async def _prune_scheduler(self):
-        """
-        Background task: runs at 00:00 UTC on the 1st of each month,
-        auto‐prune all ENDED instances and post a summary.
-        """
         await self.bot.wait_until_ready()
         while True:
             now = datetime.utcnow()
-            # compute next 1st-of-month 00:00 UTC
             year = now.year + (1 if now.month == 12 else 0)
             month = 1 if now.month == 12 else now.month + 1
             next_run = datetime(year, month, 1, 0, 0, 0)
@@ -983,7 +1007,7 @@ class Activities(commands.Cog):
                     if not ch:
                         continue
                     lines = [f"`{iid[:8]}` ({inst['type_name']})" for iid, inst in pruned]
-                    text = f"Auto‐pruned {len(pruned)} activities:\n" + "\n".join(lines)
+                    text = f"Auto-pruned {len(pruned)} activities:\n" + "\n".join(lines)
                     try:
                         await ch.send(text)
                     except:
@@ -994,7 +1018,6 @@ class Activities(commands.Cog):
     async def activity_prune(self, ctx, status: str = "ENDED", older_than: int = None):
         """
         Manually prune activities.
-        STATUS defaults to ENDED, optionally only those older than OLDER_THAN days.
         """
         pruned = await self._prune_guild(ctx.guild, status=status.upper(), older_than=older_than)
         if not pruned:
