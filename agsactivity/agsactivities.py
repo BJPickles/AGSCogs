@@ -465,6 +465,9 @@ class Activities(commands.Cog):
         insts[iid] = inst
         await self.config.guild(guild).instances.set(insts)
 
+        # update every embed to show ENDED
+        await self._update_all_embeds_to_ended(guild, iid)
+
         # Remove public buttons
         pm = inst["message_ids"].get("public")
         cid = inst.get("channel_id")
@@ -856,6 +859,9 @@ class Activities(commands.Cog):
         insts[full] = inst
         await self.config.guild(ctx.guild).instances.set(insts)
 
+        # now strip & “END” every other embed too
+        await self._update_all_embeds_to_ended(ctx.guild, full)
+
         # Remove public buttons if present
         pm = inst["message_ids"].get("public")
         cid = inst.get("channel_id")
@@ -1243,6 +1249,52 @@ class Activities(commands.Cog):
                 except Exception:
                     log.exception(f"Failed to refresh DM embed for {uid_str} in {cat}")
 
+    # ─── End the Embeds ──────────────────────────────────────────────────────────
+    async def _update_all_embeds_to_ended(self, guild: discord.Guild, iid: str):
+        """
+        Edit every embed (public + all invite/reminder/manage DMs) for `iid`
+        to show it has ended, and strip off the View/buttons.
+        """
+        insts = await self.config.guild(guild).instances()
+        inst = insts.get(iid)
+        if not inst:
+            return
+        # Build a new "ENDED" embed
+        e = self._build_embed(inst, guild)
+        # Override title & color to show it's ended
+        e.title = f"❌ ENDED — {inst['title']}"
+        e.color = discord.Color.dark_grey()
+        # 1) public
+        public_mid = inst["message_ids"].get("public")
+        cid = inst.get("channel_id")
+        if public_mid and cid:
+            try:
+                ch = guild.get_channel(cid)
+                msg = await ch.fetch_message(public_mid)
+                await msg.edit(embed=e, view=None)
+            except Exception:
+                log.exception(f"Failed updating public embed for ended {iid}")
+        # 2) DM embeds
+        for cat in ("invites", "reminders", "manages"):
+            for uid_str, mid in inst["message_ids"].get(cat, {}).items():
+                try:
+                    uid = int(uid_str)
+                    user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
+                    dm = await user.create_dm()
+                    msg = await dm.fetch_message(mid)
+                    await msg.edit(embed=e, view=None)
+                except discord.HTTPException as exc:
+                    # if rate-limited, retry once
+                    if exc.status == 429:
+                        await asyncio.sleep(2)
+                        try:
+                            await msg.edit(embed=e, view=None)
+                        except:
+                            pass
+                except Exception:
+                    log.exception(f"Failed updating DM embed ({cat}) for ended {iid}")
+
+
     # ─── public join/leave ──────────────────────────────────────────────────────
     async def _handle_public_join(self, interaction: discord.Interaction, iid: str):
         guild = interaction.guild
@@ -1452,6 +1504,10 @@ class Activities(commands.Cog):
         inst["status"] = "ENDED"
         await self.config.guild(guild).instances.set(insts)
         await interaction.response.edit_message(content="✅ Activity finalized.", view=None)
+
+        # now blow out EVERY embed (public + all DMs) to “ENDED”
+        await self._update_all_embeds_to_ended(guild, iid)
+
         try:
             ch = guild.get_channel(inst["channel_id"])
             pm = inst["message_ids"].get("public")
