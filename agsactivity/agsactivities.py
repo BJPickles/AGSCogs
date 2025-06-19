@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 
 import discord
-from discord import TextChannel, Guild, Member
+from discord import TextChannel, Guild, Member, DMChannel
 from discord.ui import View, Button, Modal, TextInput
 
 from redbot.core import commands, checks, Config
@@ -1187,6 +1187,206 @@ class Activities(commands.Cog):
         # Immediate OPEN
         await self._dispatch_open(guild,iid,ctx)
 
+    # ─── helper ──────────────────────────────────────────────────────────────────
+    async def _find_instance(self, iid: str):
+        """
+        Scan all guilds for an instance matching iid.
+        Returns (guild, insts_dict, inst_dict) or (None, None, None).
+        """
+        for guild in self.bot.guilds:
+            insts = await self.config.guild(guild).instances()
+            if iid in insts:
+                return guild, insts, insts[iid]
+        return None, None, None
 
+    # ─── public join/leave ──────────────────────────────────────────────────────
+    async def _handle_public_join(self, interaction: discord.Interaction, iid: str):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("Guild context missing.", ephemeral=True)
+        insts = await self.config.guild(guild).instances()
+        inst = insts.get(iid)
+        if not inst or inst["status"] != "OPEN" or not inst["public"]:
+            return await interaction.response.send_message("You can’t join that.", ephemeral=True)
+        uid = interaction.user.id
+        if uid in inst["participants"]:
+            return await interaction.response.send_message("You’ve already joined.", ephemeral=True)
+        inst["participants"].append(uid)
+        await self.config.guild(guild).instances.set(insts)
+
+        try:
+            ch = guild.get_channel(inst["channel_id"])
+            msg_id = inst["message_ids"].get("public")
+            if ch and msg_id:
+                msg = await ch.fetch_message(msg_id)
+                await msg.edit(embed=self._build_embed(inst, guild))
+        except Exception:
+            log.exception("Failed to update public embed after join")
+
+        await interaction.response.send_message("✅ You have joined!", ephemeral=True)
+
+    async def _handle_public_leave(self, interaction: discord.Interaction, iid: str):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("Guild context missing.", ephemeral=True)
+        insts = await self.config.guild(guild).instances()
+        inst = insts.get(iid)
+        if not inst or inst["status"] != "OPEN" or not inst["public"]:
+            return await interaction.response.send_message("You can’t leave that.", ephemeral=True)
+        uid = interaction.user.id
+        if uid not in inst["participants"]:
+            return await interaction.response.send_message("You’re not in it.", ephemeral=True)
+        inst["participants"].remove(uid)
+        await self.config.guild(guild).instances.set(insts)
+
+        try:
+            ch = guild.get_channel(inst["channel_id"])
+            msg_id = inst["message_ids"].get("public")
+            if ch and msg_id:
+                msg = await ch.fetch_message(msg_id)
+                await msg.edit(embed=self._build_embed(inst, guild))
+        except Exception:
+            log.exception("Failed to update public embed after leave")
+
+        await interaction.response.send_message("✅ You have left.", ephemeral=True)
+
+    # ─── private DM join/leave ─────────────────────────────────────────────────
+    async def _handle_private_join(self, interaction: discord.Interaction, iid: str, user_id: int):
+        guild, insts, inst = await self._find_instance(iid)
+        if not guild:
+            return await interaction.response.send_message("Activity not found.", ephemeral=False)
+        if interaction.user.id != user_id:
+            return await interaction.response.send_message("This button isn’t for you.", ephemeral=False)
+        if inst["public"] or inst["status"] != "OPEN":
+            return await interaction.response.send_message("Cannot join this.", ephemeral=False)
+        if user_id in inst["participants"]:
+            return await interaction.response.send_message("Already joined.", ephemeral=False)
+
+        inst["participants"].append(user_id)
+        await self.config.guild(guild).instances.set(insts)
+
+        embed = self._build_embed(inst, guild)
+        view = PrivateManageView(self, iid, user_id)
+        try:
+            await interaction.response.edit_message(embed=embed, view=view)
+        except discord.HTTPException:
+            dm = await interaction.user.create_dm()
+            man_msg = await dm.send(embed=embed, view=view)
+            inst["message_ids"].setdefault("manages", {})[str(user_id)] = man_msg.id
+            await self.config.guild(guild).instances.set(insts)
+
+    async def _handle_private_leave(self, interaction: discord.Interaction, iid: str, user_id: int):
+        guild, insts, inst = await self._find_instance(iid)
+        if not guild:
+            return await interaction.response.send_message("Activity not found.", ephemeral=False)
+        if interaction.user.id != user_id:
+            return await interaction.response.send_message("This button isn’t for you.", ephemeral=False)
+        if inst["public"] or inst["status"] != "OPEN":
+            return await interaction.response.send_message("Cannot leave this.", ephemeral=False)
+        if user_id not in inst["participants"]:
+            return await interaction.response.send_message("You’re not in it.", ephemeral=False)
+
+        inst["participants"].remove(user_id)
+        await self.config.guild(guild).instances.set(insts)
+
+        embed = self._build_embed(inst, guild)
+        view = PrivateManageView(self, iid, user_id)
+        try:
+            await interaction.response.edit_message(embed=embed, view=view)
+        except Exception:
+            log.exception("Failed to edit private‐leave manage message")
+
+    # ─── RSVP / reminder / private‐invite ────────────────────────────────────────
+    async def _handle_rsvp(self, interaction: discord.Interaction, iid: str, target_id: int, accepted: bool):
+        guild, insts, inst = await self._find_instance(iid)
+        if not guild:
+            return await interaction.response.send_message("Scheduled activity not found.", ephemeral=False)
+        key = str(target_id)
+        inst["rsvps"][key] = "ACCEPTED" if accepted else "DECLINED"
+        await self.config.guild(guild).instances.set(insts)
+        await interaction.response.edit_message(
+            content=f"You have {'accepted' if accepted else 'declined'} the RSVP.",
+            view=None
+        )
+
+    async def _handle_reminder_leave(self, interaction: discord.Interaction, iid: str, target_id: int):
+        guild, insts, inst = await self._find_instance(iid)
+        if guild and target_id in inst["participants"]:
+            inst["participants"].remove(target_id)
+            await self.config.guild(guild).instances.set(insts)
+        await interaction.response.edit_message(
+            content="You have left the upcoming activity.",
+            view=None
+        )
+
+    async def _handle_invite_accept(self, interaction: discord.Interaction, iid: str, target_id: int):
+        guild, insts, inst = await self._find_instance(iid)
+        if not guild:
+            return await interaction.response.send_message("Activity not found.", ephemeral=False)
+        uid = target_id
+        if uid not in inst["participants"]:
+            inst["participants"].append(uid)
+            await self.config.guild(guild).instances.set(insts)
+        await interaction.response.edit_message(embed=self._build_embed(inst, guild), view=None)
+        embed = self._build_embed(inst, guild)
+        view = PrivateManageView(self, iid, uid)
+        dm = await interaction.user.create_dm()
+        man_msg = await dm.send(embed=embed, view=view)
+        inst["message_ids"].setdefault("manages", {})[str(uid)] = man_msg.id
+        await self.config.guild(guild).instances.set(insts)
+
+    async def _handle_invite_decline(self, interaction: discord.Interaction, iid: str, target_id: int):
+        await interaction.response.edit_message(
+            content="You have declined the invite.",
+            view=None
+        )
+
+    async def _handle_invite_reply(self, interaction: discord.Interaction, iid: str, target_id: int, content: str):
+        for guild in self.bot.guilds:
+            insts = await self.config.guild(guild).instances()
+            if iid in insts:
+                owner_id = insts[iid]["owner_id"]
+                owner = self.bot.get_user(owner_id) or await self.bot.fetch_user(owner_id)
+                if owner:
+                    await owner.send(f"✉️ **Reply for `{iid}`** from {interaction.user.mention}:\n> {content}")
+                break
+
+    # ─── auto‐end extend/finalize ─────────────────────────────────────────────────
+    async def _handle_extend(self, interaction: discord.Interaction, iid: str):
+        guild, insts, inst = await self._find_instance(iid)
+        if not guild:
+            return await interaction.response.send_message("Activity not found.", ephemeral=True)
+        import time
+        inst["end_time"] = time.time() + 12 * 3600
+        inst["status"] = "OPEN"
+        await self.config.guild(guild).instances.set(insts)
+        await interaction.response.edit_message(content="✅ Activity extended 12h.", view=None)
+        self.bot.loop.create_task(self._auto_end_task(guild.id, iid, 12 * 3600))
+
+    async def _handle_finalize(self, interaction: discord.Interaction, iid: str):
+        guild, insts, inst = await self._find_instance(iid)
+        if not guild:
+            return await interaction.response.send_message("Activity not found.", ephemeral=True)
+        inst["status"] = "ENDED"
+        await self.config.guild(guild).instances.set(insts)
+        await interaction.response.edit_message(content="✅ Activity finalized.", view=None)
+        try:
+            ch = guild.get_channel(inst["channel_id"])
+            pm = inst["message_ids"].get("public")
+            if ch and pm:
+                msg = await ch.fetch_message(pm)
+                await msg.edit(embed=self._build_embed(inst, guild), view=None)
+        except:
+            pass
+        for uid_str, mid in inst["message_ids"].get("manages", {}).items():
+            try:
+                uid = int(uid_str)
+                user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
+                dm = await user.create_dm()
+                msg = await dm.fetch_message(mid)
+                await msg.edit(embed=self._build_embed(inst, guild), view=None)
+            except:
+                continue
+                
 async def setup(bot: Red):
     await bot.add_cog(Activities(bot))   
