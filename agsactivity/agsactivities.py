@@ -696,10 +696,16 @@ class Activities(commands.Cog):
             self.bot.add_view(view, message_id=msg.id)
             await ctx.send(f"✅ Public activity created (ID `{iid}`).")
             await self._log(guild, f"{author.mention} created public **{inst['title']}** (`{iid}`).")
+       #     
         else:
             fails = []
-            # Invites
-            for uid in inst["dm_targets"]:
+
+            # ───> don’t DM the owner an “invite” (they’re auto-accepted)
+            owner = inst["owner_id"]
+            # author.id has already been appended to participants above
+            invite_targets = [uid for uid in inst["dm_targets"] if uid != owner]
+
+            for uid in invite_targets:
                 try:
                     user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
                     dm = await user.create_dm()
@@ -710,19 +716,26 @@ class Activities(commands.Cog):
                     self.bot.add_view(view1, message_id=inv_msg.id)
                 except:
                     fails.append(uid)
-            # Manage DM for creator
+
+            # ───> now send the “manage” DM to everyone who is already a participant,
+            #      including the owner (so they get exactly one manage embed)
             for uid in inst["participants"]:
                 try:
                     user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
                     dm = await user.create_dm()
-                    e2 = self._build_embed(inst, guild)
-                    view2 = PrivateManageView(self, iid, uid)
-                    man_msg = await dm.send(embed=e2, view=view2)
+                    man_e = self._build_embed(inst, guild)
+                    v2 = PrivateManageView(self, iid, uid)
+                    man_msg = await dm.send(embed=man_e, view=v2)
                     inst["message_ids"].setdefault("manages", {})[str(uid)] = man_msg.id
-                    self.bot.add_view(view2, message_id=man_msg.id)
+                    self.bot.add_view(v2, message_id=man_msg.id)
                 except:
                     log.exception(f"Failed to DM manage for user {uid}")
+
             await self.config.guild(guild).instances.set(insts)
+
+
+
+
             if fails:
                 await ctx.send(f"✅ Private created (ID `{iid}`), but failed to DM: " + ", ".join(f"<@{u}>" for u in fails))
             else:
@@ -1199,6 +1212,37 @@ class Activities(commands.Cog):
                 return guild, insts, insts[iid]
         return None, None, None
 
+    # ─── refresh dms ────────────────────────────────────────────────────────────
+    async def _refresh_all_dms(self, guild: discord.Guild, iid: str):
+        """
+        Edit *every* invite/reminder/manage DM embed for activity `iid` so 
+        that its participant list (and slot count) stays in sync.
+        """
+        insts = await self.config.guild(guild).instances()
+        inst = insts.get(iid)
+        if not inst:
+            return
+        new_embed = self._build_embed(inst, guild)
+        # categories to update
+        for cat in ("invites", "reminders", "manages"):
+            for uid_str, msg_id in inst["message_ids"].get(cat, {}).items():
+                try:
+                    uid = int(uid_str)
+                    user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
+                    dm = await user.create_dm()
+                    msg = await dm.fetch_message(msg_id)
+                    await msg.edit(embed=new_embed)
+                except discord.HTTPException as e:
+                    # rate‐limit? pause and retry once
+                    if e.status == 429:
+                        await asyncio.sleep(2)
+                        try:
+                            await msg.edit(embed=new_embed)
+                        except:
+                            pass
+                except Exception:
+                    log.exception(f"Failed to refresh DM embed for {uid_str} in {cat}")
+
     # ─── public join/leave ──────────────────────────────────────────────────────
     async def _handle_public_join(self, interaction: discord.Interaction, iid: str):
         guild = interaction.guild
@@ -1347,18 +1391,25 @@ class Activities(commands.Cog):
     async def _handle_invite_accept(self, interaction: discord.Interaction, iid: str, target_id: int):
         guild, insts, inst = await self._find_instance(iid)
         if not guild:
-            return await interaction.response.send_message("Activity not found.", ephemeral=False)
+            return await interaction.response.send_message("Activity not found.", ephemeral=True)
         uid = target_id
         if uid not in inst["participants"]:
             inst["participants"].append(uid)
             await self.config.guild(guild).instances.set(insts)
+
+        # disable the invite buttons & update *that* invite message
         await interaction.response.edit_message(embed=self._build_embed(inst, guild), view=None)
-        embed = self._build_embed(inst, guild)
-        view = PrivateManageView(self, iid, uid)
+        
+        # send the acceptor their personal manage‐DM
+        man_embed = self._build_embed(inst, guild)
+        v2 = PrivateManageView(self, iid, uid)
         dm = await interaction.user.create_dm()
-        man_msg = await dm.send(embed=embed, view=view)
+        man_msg = await dm.send(embed=man_embed, view=v2)
         inst["message_ids"].setdefault("manages", {})[str(uid)] = man_msg.id
         await self.config.guild(guild).instances.set(insts)
+
+        # now refresh every other DM embed (owner, other invites/reminders, etc.)
+        self.bot.loop.create_task(self._refresh_all_dms(guild, iid))
 
     async def _handle_invite_decline(self, interaction: discord.Interaction, iid: str, target_id: int):
         await interaction.response.edit_message(
