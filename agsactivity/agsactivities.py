@@ -1344,6 +1344,9 @@ class Activities(commands.Cog):
             inst["message_ids"].setdefault("manages", {})[str(user_id)] = man_msg.id
             await self.config.guild(guild).instances.set(insts)
 
+        # <— newly added: refresh every DM embed for this activity
+        self.bot.loop.create_task(self._refresh_all_dms(guild, iid))
+
     async def _handle_private_leave(self, interaction: discord.Interaction, iid: str, user_id: int):
         guild, insts, inst = await self._find_instance(iid)
         if not guild:
@@ -1364,6 +1367,9 @@ class Activities(commands.Cog):
             await interaction.response.edit_message(embed=embed, view=view)
         except Exception:
             log.exception("Failed to edit private‐leave manage message")
+
+        # <— newly added: refresh every DM embed for this activity
+        self.bot.loop.create_task(self._refresh_all_dms(guild, iid))
 
     # ─── RSVP / reminder / private‐invite ────────────────────────────────────────
     async def _handle_rsvp(self, interaction: discord.Interaction, iid: str, target_id: int, accepted: bool):
