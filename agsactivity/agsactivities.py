@@ -6,7 +6,7 @@ from datetime import datetime
 
 import discord
 from discord import TextChannel, Guild, Member
-from discord.ui import View, Button
+from discord.ui import View, Button, Modal, TextInput
 
 from redbot.core import commands, checks, Config
 from redbot.core.bot import Red
@@ -305,8 +305,8 @@ class Activities(commands.Cog):
     # ──────────────────────────────────────────────────────────────────────────
     # Embed Builder & Logging
     # ──────────────────────────────────────────────────────────────────────────
-    
-            def _build_embed(self, inst: dict, guild: Guild) -> discord.Embed:
+
+    def _build_embed(self, inst: dict, guild: Guild) -> discord.Embed:
         # Build a list of participant display names
         parts = []
         for uid in inst["participants"]:
@@ -329,7 +329,7 @@ class Activities(commands.Cog):
         e = discord.Embed(
             title=title,
             description=inst.get("description", "No description."),
-            color=discord.Color.blurple()
+            color=discord.Color.blurple(),
         )
 
         # Owner field
@@ -337,14 +337,14 @@ class Activities(commands.Cog):
         e.add_field(
             name="Owner",
             value=owner.mention if owner else "Unknown",
-            inline=True
+            inline=True,
         )
 
         # Slots field
         e.add_field(
             name="Slots",
             value=slots,
-            inline=True
+            inline=True,
         )
 
         # Scheduled time (if any)
@@ -353,7 +353,7 @@ class Activities(commands.Cog):
             e.add_field(
                 name="Scheduled",
                 value=f"<t:{int(sched)}:F> (<t:{int(sched)}:R>)",
-                inline=False
+                inline=False,
             )
 
         # Participant list (if any)
@@ -361,7 +361,7 @@ class Activities(commands.Cog):
             e.add_field(
                 name="Participants",
                 value="\n".join(parts),
-                inline=False
+                inline=False,
             )
 
         # Footer with channel mention (if set)
@@ -372,7 +372,6 @@ class Activities(commands.Cog):
                 e.set_footer(text=f"In {ch.mention}")
 
         return e
-
 
     async def _log(self, guild: Guild, message: str):
         """Send an audit‐style log message to the configured log channel."""
@@ -1143,35 +1142,51 @@ class Activities(commands.Cog):
     ):
         # RSVP stage for scheduled private activities
         guild = None
+        insts = None
         inst = None
+
+        # Locate the guild & instance
         for g in self.bot.guilds:
-            insts = await self.config.guild(g).instances()
-            if iid in insts:
+            temp = await self.config.guild(g).instances()
+            if iid in temp:
                 guild = g
+                insts = temp
                 inst = insts[iid]
                 break
+
         if not inst or inst["status"] != "SCHEDULED":
-            return await interaction.response.send_message("No such scheduled activity.", ephemeral=True)
+            return await interaction.response.send_message(
+                "No such scheduled activity.", ephemeral=True
+            )
 
         uid = str(target)
-        state = inst["rsvps"].get(uid)
-        if state != "PENDING":
-            return await interaction.response.send_message("Already responded.", ephemeral=True)
+        if inst["rsvps"].get(uid) != "PENDING":
+            return await interaction.response.send_message(
+                "You have already responded.", ephemeral=True
+            )
 
+        # Update our local copy
         inst["rsvps"][uid] = "ACCEPTED" if accepted else "DECLINED"
-        # remove buttons
+        insts[iid] = inst
+        # Persist the change
+        await self.config.guild(guild).instances.set(insts)
+
+        # Remove the buttons
         try:
             await interaction.message.edit(view=None)
         except Exception:
             pass
+
+        # Acknowledge the user
         await interaction.response.send_message(
-            "✅ RSVP: Yes" if accepted else "❌ RSVP: No",
-            ephemeral=True,
+            "✅ RSVP: Yes" if accepted else "❌ RSVP: No", ephemeral=True
         )
-        await self.config.guild(guild).instances.set(insts := await self.config.guild(guild).instances())
+
+        # Audit‐log
         await self._log(
             guild,
-            f"{interaction.user.mention} RSVPed {'YES' if accepted else 'NO'} to `{iid[:8]}`."
+            f"{interaction.user.mention} RSVPed "
+            f"{'YES' if accepted else 'NO'} to `{iid[:8]}`.",
         )
 
     async def _handle_invite_accept(self, interaction: discord.Interaction, iid: str, target: int):
