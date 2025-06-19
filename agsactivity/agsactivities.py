@@ -624,6 +624,50 @@ class Activities(commands.Cog):
         await self.config.guild(ctx.guild).instances.set(insts)
         await ctx.send(f"Pruned {len(removed)} activities.")
 
+
+    @activity.command(name="stop")
+    async def stop_activity(self, ctx, iid: str):
+        """Manually end (finalize) an OPEN or SCHEDULED activity."""
+        # 1) Pull all instances and look up by prefix
+        insts = await self.config.guild(ctx.guild).instances()
+        full = next((k for k in insts if k.startswith(iid.lower())), None)
+        if not full:
+            return await ctx.send("❌ No such activity.")
+
+        inst = insts[full]
+
+        # 2) Only the owner may stop it
+        if inst["owner_id"] != ctx.author.id:
+            return await ctx.send("❌ Only the activity owner can stop it.")
+
+        # 3) If it's already ended, nothing to do
+        if inst["status"] == "ENDED":
+            return await ctx.send("ℹ️ That activity is already ended.")
+
+        # 4) Mark it ended and persist
+        inst["status"] = "ENDED"
+        insts[full] = inst
+        await self.config.guild(ctx.guild).instances.set(insts)
+
+        # 5) Remove buttons from the public message (if any)
+        pm_id = inst["message_ids"].get("public")
+        chan_id = inst.get("channel_id")
+        if pm_id and chan_id:
+            ch = ctx.guild.get_channel(chan_id)
+            if ch:
+                try:
+                    msg = await ch.fetch_message(pm_id)
+                    await msg.edit(embed=self._build_embed(inst, ctx.guild), view=None)
+                except Exception:
+                    log.exception("Failed to clear buttons on public message")
+
+        # 6) Notify in the invoking channel, and log it
+        await ctx.send(f"✅ Activity `{full[:8]}` has been stopped.")
+        await self._log(
+            ctx.guild,
+            f"{ctx.author.mention} manually stopped `{full[:8]}` (“{inst['title']}”)."
+        )
+
     # ──────────────────────────────────────────────────────────────────────────
     # Templates: save, list, remove
     # ──────────────────────────────────────────────────────────────────────────
