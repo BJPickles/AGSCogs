@@ -306,62 +306,85 @@ class Activities(commands.Cog):
     # Embed Builder & Logging
     # ──────────────────────────────────────────────────────────────────────────
     def _build_embed(self, inst: dict, guild: Guild) -> discord.Embed:
-        parts = []
-        for uid in inst["participants"]:
-            m = guild.get_member(int(uid))
-            parts.append(m.display_name if m else f"User#{uid}")
+    # Participants list (display_name or fallback)
+    parts = []
+    for uid in inst["participants"]:
+        member = guild.get_member(int(uid))
+        parts.append(member.display_name if member else f"User#{uid}")
 
-        curr = len(parts)
-        maxs = inst.get("max_slots")
-        if maxs:
-            ratio = curr / maxs
-            emoji = "🟢" if ratio < 0.5 else ("🟠" if ratio < 1 else "🔴")
-            slots = f"{curr}/{maxs}"
-        else:
-            emoji = "🟢"
-            slots = f"{curr}/∞"
+    # Emoji & slot text
+    curr = len(parts)
+    maxs = inst.get("max_slots")
+    if maxs:
+        ratio = curr / maxs
+        emoji = "🟢" if ratio < 0.5 else ("🟠" if ratio < 1 else "🔴")
+        slots = f"{curr}/{maxs}"
+    else:
+        emoji = "🟢"
+        slots = f"{curr}/∞"
 
-        title = f"{emoji} {inst['title']}"
-        e = discord.Embed(
-            title=title,
-            description=inst.get("description", "No description."),
-            color=discord.Color.blurple(),
+    # Build embed
+    title = f"{emoji} {inst['title']}"
+    e = discord.Embed(
+        title=title,
+        description=inst.get("description", "No description."),
+        color=discord.Color.blurple(),
+    )
+
+    # Owner field
+    owner = guild.get_member(inst["owner_id"]) or self.bot.get_user(inst["owner_id"])
+    e.add_field(
+        name="Owner",
+        value=owner.mention if owner else "Unknown",
+        inline=True,
+    )
+
+    # Slots field
+    e.add_field(
+        name="Slots",
+        value=slots,
+        inline=True,
+    )
+
+    # Scheduled time, if any
+    sched = inst.get("scheduled_time")
+    if sched:
+        e.add_field(
+            name="Scheduled",
+            value=f"<t:{int(sched)}:F> (<t:{int(sched)}:R>)",
+            inline=False,
         )
-        owner = guild.get_member(inst["owner_id"]) or self.bot.get_user(inst["owner_id"])
-        e.add_field("Owner", owner.mention if owner else "Unknown", inline=True)
-        e.add_field("Slots", slots, inline=True)
 
-        sched = inst.get("scheduled_time")
-        if sched:
-            e.add_field(
-                "Scheduled",
-                f"<t:{int(sched)}:F> (<t:{int(sched)}:R>)",
-                inline=False,
-            )
+    # Participant names, if any
+    if parts:
+        e.add_field(
+            name="Participants",
+            value="\n".join(parts),
+            inline=False,
+        )
 
-        if parts:
-            e.add_field("Participants", "\n".join(parts), inline=False)
+    # Footer with channel mention, if set
+    chan_id = inst.get("channel_id")
+    if chan_id:
+        ch = guild.get_channel(chan_id)
+        if ch:
+            e.set_footer(text=f"In {ch.mention}")
 
-        chan_id = inst.get("channel_id")
-        if chan_id:
-            ch = guild.get_channel(chan_id)
-            if ch:
-                e.set_footer(text=f"In {ch.mention}")
+    return e
 
-        return e
-
-    async def _log(self, guild: Guild, message: str):
-        cid = await self.config.guild(guild).log_channel_id()
-        if not cid:
-            return
-        ch = guild.get_channel(cid)
-        if not ch:
-            return
-        ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        try:
-            await ch.send(f"[{ts}] {message}")
-        except Exception:
-            log.exception("Failed to send log message")
+async def _log(self, guild: Guild, message: str):
+    """Send an audit‐style log message to the configured log channel."""
+    cid = await self.config.guild(guild).log_channel_id()
+    if not cid:
+        return
+    ch = guild.get_channel(cid)
+    if not ch:
+        return
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    try:
+        await ch.send(f"[{ts}] {message}")
+    except Exception:
+        log.exception("Failed to send log message")
 
     # ──────────────────────────────────────────────────────────────────────────
     # Auto-end & Scheduling
