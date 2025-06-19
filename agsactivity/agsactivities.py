@@ -465,9 +465,6 @@ class Activities(commands.Cog):
         insts[iid] = inst
         await self.config.guild(guild).instances.set(insts)
 
-        # update every embed to show ENDED
-        await self._update_all_embeds_to_ended(guild, iid)
-
         # Remove public buttons
         pm = inst["message_ids"].get("public")
         cid = inst.get("channel_id")
@@ -847,37 +844,26 @@ class Activities(commands.Cog):
     async def stop_activity(self, ctx, iid: str):
         """Manually end (finalize) an OPEN or SCHEDULED activity."""
         insts = await self.config.guild(ctx.guild).instances()
-        full = next((k for k in insts if k.startswith(iid)), None)
-        if not full:
+        inst = insts.get(iid)
+        if not inst:
             return await ctx.send("❌ No such activity.")
-        inst = insts[full]
         if inst["owner_id"] != ctx.author.id:
             return await ctx.send("❌ Only the activity owner can stop it.")
         if inst["status"] == "ENDED":
             return await ctx.send("ℹ️ That activity is already ended.")
+
+        # 1) mark it ended & persist
         inst["status"] = "ENDED"
-        insts[full] = inst
         await self.config.guild(ctx.guild).instances.set(insts)
 
-        # now strip & “END” every other embed too
-        await self._update_all_embeds_to_ended(ctx.guild, full)
+        # 2) blow out every embed (public + all DMs) to ❌ ENDED
+        await self._update_all_embeds_to_ended(ctx.guild, iid)
 
-        # Remove public buttons if present
-        pm = inst["message_ids"].get("public")
-        cid = inst.get("channel_id")
-        if pm and cid:
-            ch = ctx.guild.get_channel(cid)
-            if ch:
-                try:
-                    msg = await ch.fetch_message(pm)
-                    await msg.edit(embed=self._build_embed(inst, ctx.guild), view=None)
-                except:
-                    pass
-
-        await ctx.send(f"✅ Activity `{full}` has been stopped.")
+        # 3) confirm to the owner
+        await ctx.send(f"✅ Activity `{iid}` has been stopped.")
         await self._log(
             ctx.guild,
-            f"{ctx.author.mention} manually stopped `{full}` (“{inst['title']}”)."
+            f"{ctx.author.mention} manually stopped `{iid}` (“{inst['title']}”)."
         )
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -1249,7 +1235,7 @@ class Activities(commands.Cog):
                 except Exception:
                     log.exception(f"Failed to refresh DM embed for {uid_str} in {cat}")
 
-    # ─── End the Embeds ──────────────────────────────────────────────────────────
+    # ─── End the Embeds ────────────────────────────────────────────────────────────
     async def _update_all_embeds_to_ended(self, guild: discord.Guild, iid: str):
         """
         Edit every embed (public + all invite/reminder/manage DMs) for `iid`
@@ -1497,34 +1483,18 @@ class Activities(commands.Cog):
         await interaction.response.edit_message(content="✅ Activity extended 12h.", view=None)
         self.bot.loop.create_task(self._auto_end_task(guild.id, iid, 12 * 3600))
 
-    async def _handle_finalize(self, interaction: discord.Interaction, iid: str):
+    async def _handle_finalize(self, interaction, iid):
         guild, insts, inst = await self._find_instance(iid)
         if not guild:
             return await interaction.response.send_message("Activity not found.", ephemeral=True)
         inst["status"] = "ENDED"
         await self.config.guild(guild).instances.set(insts)
+
+        # 1) Ack the button and strip that “Finalize” message
         await interaction.response.edit_message(content="✅ Activity finalized.", view=None)
 
-        # now blow out EVERY embed (public + all DMs) to “ENDED”
+        # 2) Now blow out EVERY embed (public + all DMs) to “❌ ENDED”
         await self._update_all_embeds_to_ended(guild, iid)
-
-        try:
-            ch = guild.get_channel(inst["channel_id"])
-            pm = inst["message_ids"].get("public")
-            if ch and pm:
-                msg = await ch.fetch_message(pm)
-                await msg.edit(embed=self._build_embed(inst, guild), view=None)
-        except:
-            pass
-        for uid_str, mid in inst["message_ids"].get("manages", {}).items():
-            try:
-                uid = int(uid_str)
-                user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
-                dm = await user.create_dm()
-                msg = await dm.fetch_message(mid)
-                await msg.edit(embed=self._build_embed(inst, guild), view=None)
-            except:
-                continue
                 
 async def setup(bot: Red):
     await bot.add_cog(Activities(bot))   
