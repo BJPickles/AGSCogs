@@ -50,13 +50,12 @@ def generate_id(existing_ids):
 # DEFAULT CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 DEFAULT_GUILD = {
-    "default_channel_id":      None,
-    "log_channel_id":          None,
-    "prune_summary_channel":   None,
-    "templates":               {},
-    "instances":               {},
+    "default_channel_id":      None,   # Default channel for public activities
+    "log_channel_id":          None,   # Audit log channel
+    "prune_summary_channel":   None,   # Monthly‐prune summary channel
+    "templates":               {},     # Saved templates
+    "instances":               {},     # All live & scheduled instances
 }
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI CLASSES
@@ -68,7 +67,12 @@ class ActionButton(Button):
         self._cb = cb
 
     async def callback(self, interaction: discord.Interaction):
-        await self._cb(interaction)
+        try:
+            await self._cb(interaction)
+        except Exception:
+            log.exception("Error in button callback")
+            if not interaction.response.is_done():
+                await interaction.response.send_message("An error occurred.", ephemeral=True)
 
 
 class PublicActivityView(View):
@@ -77,7 +81,6 @@ class PublicActivityView(View):
         super().__init__(timeout=None)
         self.cog = cog
         self.iid = iid
-        # We keep both buttons— callbacks themselves enforce "already joined" or "not joined"
         self.add_item(ActionButton(
             label="Join",
             style=discord.ButtonStyle.green,
@@ -175,7 +178,6 @@ class InviteView(View):
         await self.cog._handle_invite_decline(interaction, self.iid, self.target_id)
 
     async def invite_reply(self, interaction: discord.Interaction):
-        # Fixed Modal: no ephemeral in DMs
         class ReplyModal(Modal):
             def __init__(self_inner):
                 super().__init__(title="Send a message to the owner")
@@ -189,16 +191,25 @@ class InviteView(View):
                 self_inner.add_item(self_inner.response)
 
             async def on_submit(self_inner, modal_interaction: discord.Interaction):
-                # DM mods & bots don't support ephemeral=True
-                await modal_interaction.response.send_message(
-                    "Your message has been sent to the activity owner.", ephemeral=False
-                )
-                await self.cog._handle_invite_reply(
-                    modal_interaction,
-                    self.iid,
-                    self.target_id,
-                    self_inner.response.value,
-                )
+                # Ephemeral isn't supported in DMs, so only use it in guild channels
+                if isinstance(modal_interaction.channel, discord.DMChannel):
+                    await modal_interaction.response.send_message(
+                        "Your message has been sent to the activity owner."
+                    )
+                else:
+                    await modal_interaction.response.send_message(
+                        "Your message has been sent to the activity owner.",
+                        ephemeral=True
+                    )
+                try:
+                    await self.cog._handle_invite_reply(
+                        modal_interaction,
+                        self.iid,
+                        self.target_id,
+                        self_inner.response.value,
+                    )
+                except Exception:
+                    log.exception("Error in invite-reply handler")
 
         await interaction.response.send_modal(ReplyModal())
 
@@ -232,6 +243,7 @@ class ExtendView(View):
 class PrivateManageView(View):
     """
     Join/Leave buttons for private events in DMs.
+    Allows rejoin if you accidentally leave.
     """
     def __init__(self, cog: "Activities", iid: str, user_id: int):
         super().__init__(timeout=None)
@@ -262,7 +274,7 @@ class PrivateManageView(View):
 # ACTIVITIES COG
 # ─────────────────────────────────────────────────────────────────────────────
 class Activities(commands.Cog):
-    """Fully‐featured activities cog with scheduling, RSVP, embeds, logs, destinations."""
+    """Fully-featured activities cog with scheduling, RSVP, embeds, logs, destinations."""
     def __init__(self, bot: Red):
         self.bot = bot
         self.config = Config.get_conf(
@@ -272,10 +284,6 @@ class Activities(commands.Cog):
         bot.loop.create_task(self._startup_tasks())
         bot.loop.create_task(self._monthly_prune_scheduler())
 
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # STARTUP & MONTHLY PRUNE (UNCHANGED from your original)
-    # ──────────────────────────────────────────────────────────────────────────
     async def _startup_tasks(self):
         await self.bot.wait_until_ready()
         now = time.time()
@@ -286,49 +294,66 @@ class Activities(commands.Cog):
                 status = inst["status"]
                 msgs = inst["message_ids"]
 
-                # Re‐add public view
+                # Public OPEN
                 if status == "OPEN" and inst["public"] and msgs.get("public"):
-                    self.bot.add_view(PublicActivityView(self, iid), message_id=msgs["public"])
+                    self.bot.add_view(
+                        PublicActivityView(self, iid),
+                        message_id=msgs["public"],
+                    )
 
-                # Re‐add private invite & manage views
+                # Live private invites & manage DMs
                 if status == "OPEN" and not inst["public"]:
                     for uid, mid in msgs.get("invites", {}).items():
-                        self.bot.add_view(InviteView(self, iid, int(uid)), message_id=mid)
+                        self.bot.add_view(
+                            InviteView(self, iid, int(uid)),
+                            message_id=mid,
+                        )
                     for uid, mid in msgs.get("manages", {}).items():
-                        self.bot.add_view(PrivateManageView(self, iid, int(uid)), message_id=mid)
+                        self.bot.add_view(
+                            PrivateManageView(self, iid, int(uid)),
+                            message_id=mid,
+                        )
 
-                # Re‐add RSVP views
+                # Scheduled RSVP invites
                 if status == "SCHEDULED":
                     for uid, mid in msgs.get("rsvps", {}).items():
-                        self.bot.add_view(InviteView(self, iid, int(uid), rsvp=True), message_id=mid)
-                    # …and re‐schedule start…
+                        self.bot.add_view(
+                            InviteView(self, iid, int(uid), rsvp=True),
+                            message_id=mid,
+                        )
                     sched = inst.get("scheduled_time", 0)
                     if sched > now:
-                        self.bot.loop.create_task(self._schedule_start(guild.id, iid, sched - now))
+                        self.bot.loop.create_task(
+                            self._schedule_start(guild.id, iid, sched - now)
+                        )
 
-                # Re‐add extend/ finalize
+                # Extend/Finalize after auto-end
                 if msgs.get("extend"):
-                    self.bot.add_view(ExtendView(self, iid), message_id=msgs["extend"])
+                    self.bot.add_view(
+                        ExtendView(self, iid),
+                        message_id=msgs["extend"],
+                    )
 
-                # …and re‐schedule auto‐end if needed
+                # Schedule auto-end
                 if status == "OPEN" and inst.get("end_time"):
                     delay = inst["end_time"] - now
                     if delay < 0:
                         delay = 0
-                    self.bot.loop.create_task(self._auto_end_task(guild.id, iid, delay))
-
+                    self.bot.loop.create_task(
+                        self._auto_end_task(guild.id, iid, delay)
+                    )
 
     async def _monthly_prune_scheduler(self):
-        # …exactly your original monthly prune code…
         await self.bot.wait_until_ready()
         while True:
-            # Sleep until next 1st-of-month 00:00 UTC, then prune
             now = datetime.utcnow().replace(tzinfo=timezone.utc)
+            # Next 1st of month at 00:00 UTC
             if now.month == 12:
                 nxt = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
             else:
                 nxt = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
-            await asyncio.sleep((nxt - now).total_seconds())
+            delay = (nxt - now).total_seconds()
+            await asyncio.sleep(delay)
 
             for guild in self.bot.guilds:
                 insts = await self.config.guild(guild).instances()
@@ -343,23 +368,25 @@ class Activities(commands.Cog):
                 if pruned and cid:
                     ch = guild.get_channel(cid)
                     if ch:
-                        lines = "\n".join(f"`{i}` • {inst['title']}" for i, inst in pruned)
+                        lines = "\n".join(
+                            f"`{i}` • {inst['title']}" for i, inst in pruned
+                        )
                         try:
                             await ch.send(f"Auto-pruned {len(pruned)} activities:\n{lines}")
-                        except:
+                        except Exception:
                             log.exception("Failed sending prune summary")
 
-
     # ──────────────────────────────────────────────────────────────────────────
-    # EMBED‐BUILDING & LOGGING (UNCHANGED)
+    # Embed Builder & Logging
     # ──────────────────────────────────────────────────────────────────────────
     def _build_embed(self, inst: dict, guild: Guild) -> discord.Embed:
-        # …your exact same _build_embed code from before…
+        # Participants list (now storing ints)
         parts = []
         for uid in inst["participants"]:
-            m = guild.get_member(int(uid))
+            m = guild.get_member(uid)
             parts.append(m.display_name if m else f"User#{uid}")
 
+        # Slots & status emoji
         curr = len(parts)
         maxs = inst.get("max_slots")
         if maxs:
@@ -370,21 +397,35 @@ class Activities(commands.Cog):
             emoji = "🟢"
             slots = f"{curr}/∞"
 
+        # Base embed
         title = f"{emoji} {inst['title']}"
-        e = discord.Embed(title=title, description=inst.get("description","No description."), color=discord.Color.blurple())
+        e = discord.Embed(
+            title=title,
+            description=inst.get("description", "No description."),
+            color=discord.Color.blurple(),
+        )
 
+        # Owner
         owner = guild.get_member(inst["owner_id"]) or self.bot.get_user(inst["owner_id"])
         e.add_field(name="Owner", value=owner.mention if owner else "Unknown", inline=True)
+        # Slots
         e.add_field(name="Slots", value=slots, inline=True)
-
+        # Scheduled
         sched = inst.get("scheduled_time")
         if sched:
-            e.add_field(name="Scheduled", value=f"<t:{int(sched)}:F> (<t:{int(sched)}:R>)", inline=False)
+            e.add_field(
+                name="Scheduled",
+                value=f"<t:{int(sched)}:F> (<t:{int(sched)}:R>)",
+                inline=False,
+            )
+        # Destination
         dest = inst.get("destination")
         if dest:
             e.add_field(name="Destination", value=dest, inline=False)
+        # Participants list
         if parts:
             e.add_field(name="Participants", value="\n".join(parts), inline=False)
+        # Footer with channel name
         cid = inst.get("channel_id")
         if cid:
             ch = guild.get_channel(cid)
@@ -393,7 +434,7 @@ class Activities(commands.Cog):
         return e
 
     async def _log(self, guild: Guild, message: str):
-        # …your same logging code…
+        """Audit‐style log with localized timestamp."""
         cid = await self.config.guild(guild).log_channel_id()
         if not cid:
             return
@@ -403,15 +444,13 @@ class Activities(commands.Cog):
         ts = int(datetime.utcnow().replace(tzinfo=timezone.utc).timestamp())
         try:
             await ch.send(f"[<t:{ts}:F>] {message}")
-        except:
+        except Exception:
             log.exception("Failed to send log message")
 
-
     # ──────────────────────────────────────────────────────────────────────────
-    # AUTO‐END & SCHEDULED START (UNCHANGED)
+    # Auto‐end & Scheduled Start
     # ──────────────────────────────────────────────────────────────────────────
     async def _auto_end_task(self, guild_id: int, iid: str, delay: float):
-        # …exactly your original auto‐end logic…
         await asyncio.sleep(delay)
         guild = self.bot.get_guild(guild_id)
         if not guild:
@@ -421,12 +460,12 @@ class Activities(commands.Cog):
         if not inst or inst["status"] != "OPEN":
             return
 
-        # mark ended
+        # Mark ended
         inst["status"] = "ENDED"
         insts[iid] = inst
         await self.config.guild(guild).instances.set(insts)
 
-        # remove public buttons
+        # Remove public buttons
         pm = inst["message_ids"].get("public")
         cid = inst.get("channel_id")
         if pm and cid:
@@ -463,9 +502,7 @@ class Activities(commands.Cog):
             f"Auto-ended activity `{iid}` (“{inst['title']}”)."
         )
 
-
     async def _schedule_start(self, guild_id: int, iid: str, delay: float):
-        # …your original schedule‐start logic…
         await asyncio.sleep(delay)
         guild = self.bot.get_guild(guild_id)
         if not guild:
@@ -482,7 +519,7 @@ class Activities(commands.Cog):
         insts[iid] = inst
         await self.config.guild(guild).instances.set(insts)
 
-        # prompt owner to update destination
+        # Prompt owner to update destination
         owner = self.bot.get_user(inst["owner_id"])
         if owner:
             try:
@@ -516,6 +553,7 @@ class Activities(commands.Cog):
                                 self_inner.add_item(self_inner.dest)
 
                             async def on_submit(self_inner, mod_i: discord.Interaction):
+                                # Acknowledge
                                 await mod_i.response.send_message("Destination updated.", ephemeral=True)
                                 await self.cog._handle_destination_update(
                                     mod_i, self_inner.dest.value, self.iid
@@ -534,7 +572,7 @@ class Activities(commands.Cog):
             except:
                 log.exception("Failed to DM owner for destination update")
 
-        # public vs private launch
+        # Public vs Private launch
         human_start = f"<t:{int(inst['start_time'])}:F>"
         if inst["public"]:
             ch = guild.get_channel(inst["channel_id"])
@@ -548,19 +586,19 @@ class Activities(commands.Cog):
                     await self.config.guild(guild).instances.set(insts)
                     self.bot.add_view(view, message_id=msg.id)
                 except:
-                    pass
+                    log.exception("Failed to send public activity start message")
             await self._log(guild, f"Scheduled public `{iid}` started at {human_start}.")
         else:
             # Add accepted RSVPs as participants
             for uid_str, state in inst["rsvps"].items():
                 if state == "ACCEPTED":
-                    inst["participants"].append(uid_str)
+                    # store as int
+                    inst["participants"].append(int(uid_str))
             insts[iid] = inst
             await self.config.guild(guild).instances.set(insts)
 
             # Send reminder + manage DMs
-            for uid_str in inst["participants"]:
-                uid = int(uid_str)
+            for uid in inst["participants"]:
                 try:
                     user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
                     dm = await user.create_dm()
@@ -569,28 +607,23 @@ class Activities(commands.Cog):
                     rem_e.title = f"🔔 Reminder: {rem_e.title}"
                     v1 = InviteView(self, iid, uid, reminder=True)
                     rem_msg = await dm.send(embed=rem_e, view=v1)
-                    inst["message_ids"].setdefault("reminders", {})[uid_str] = rem_msg.id
+                    inst["message_ids"].setdefault("reminders", {})[str(uid)] = rem_msg.id
                     self.bot.add_view(v1, message_id=rem_msg.id)
                     # Manage embed
                     man_e = self._build_embed(inst, guild)
                     v2 = PrivateManageView(self, iid, uid)
                     man_msg = await dm.send(embed=man_e, view=v2)
-                    inst["message_ids"].setdefault("manages", {})[uid_str] = man_msg.id
+                    inst["message_ids"].setdefault("manages", {})[str(uid)] = man_msg.id
                     self.bot.add_view(v2, message_id=man_msg.id)
                 except:
-                    pass
+                    log.exception(f"Failed to DM user {uid} for reminder/manage on start")
             await self._log(guild, f"Scheduled private `{iid}` started at {human_start} (reminders & manage DMs sent).")
 
         # Schedule auto-end
         self.bot.loop.create_task(self._auto_end_task(guild.id, iid, 12 * 3600))
 
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # DESTINATION UPDATE HANDLER (UNCHANGED)
-    # ──────────────────────────────────────────────────────────────────────────
     async def _handle_destination_update(self, interaction: discord.Interaction, dest_text: str, iid: str):
-        # …your exact same code…
-        # find guild & inst
+        """Owner updated destination; persist & edit all embeds."""
         guild = None
         inst = None
         for g in self.bot.guilds:
@@ -601,7 +634,7 @@ class Activities(commands.Cog):
                 break
         if not inst:
             return
-        # parse channel mention
+        # Parse channel mention if present
         if m := re.search(r"<#(\d+)>", dest_text):
             ch = guild.get_channel(int(m.group(1)))
             dest = f"#{ch.name}" if ch else dest_text
@@ -621,34 +654,33 @@ class Activities(commands.Cog):
                 msg = await guild.get_channel(inst["channel_id"]).fetch_message(mids["public"])
                 await msg.edit(embed=e)
             except:
-                pass
+                log.exception("Failed to edit public embed on destination update")
 
         # Private DMs (invites, reminders, manages)
         for key in ("invites", "reminders", "manages"):
-            for mid in mids.get(key, {}).values():
+            for uid_str, mid in mids.get(key, {}).items():
                 try:
-                    for ch in self.bot.private_channels:
-                        if isinstance(ch, discord.DMChannel):
-                            await ch.edit_message(mid, embed=e)
+                    # DMs need to fetch user then channel
+                    uid = int(uid_str)
+                    user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
+                    dm = await user.create_dm()
+                    await dm.edit_message(mid, embed=e)
                 except:
                     continue
 
         await interaction.response.edit_message(content="All embeds updated with new destination.", view=None)
 
-
     # ──────────────────────────────────────────────────────────────────────────
-    # DISPATCH OPEN (PUBLIC OR PRIVATE)
+    # Dispatch OPEN (public or private)
     # ──────────────────────────────────────────────────────────────────────────
     async def _dispatch_open(self, guild: Guild, iid: str, ctx):
-        # …your original dispatch code…
         insts = await self.config.guild(guild).instances()
         inst = insts[iid]
         author = ctx.author
 
-        # Ensure creator auto-joins
-        uid_str = str(author.id)
-        if uid_str not in inst["participants"]:
-            inst["participants"].append(uid_str)
+        # Ensure creator auto-joins (store as int)
+        if author.id not in inst["participants"]:
+            inst["participants"].append(author.id)
             insts[iid] = inst
             await self.config.guild(guild).instances.set(insts)
 
@@ -679,348 +711,26 @@ class Activities(commands.Cog):
                 except:
                     fails.append(uid)
             # Manage DM for creator
-            for uid_str in inst["participants"]:
-                uid = int(uid_str)
+            for uid in inst["participants"]:
                 try:
                     user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
                     dm = await user.create_dm()
                     e2 = self._build_embed(inst, guild)
                     view2 = PrivateManageView(self, iid, uid)
                     man_msg = await dm.send(embed=e2, view=view2)
-                    inst["message_ids"].setdefault("manages", {})[uid_str] = man_msg.id
+                    inst["message_ids"].setdefault("manages", {})[str(uid)] = man_msg.id
                     self.bot.add_view(view2, message_id=man_msg.id)
                 except:
-                    pass
+                    log.exception(f"Failed to DM manage for user {uid}")
             await self.config.guild(guild).instances.set(insts)
             if fails:
                 await ctx.send(f"✅ Private created (ID `{iid}`), but failed to DM: " + ", ".join(f"<@{u}>" for u in fails))
             else:
                 await ctx.send(f"✅ Private activity created and invites sent (ID `{iid}`).")
 
-
     # ──────────────────────────────────────────────────────────────────────────
-    # NEW INTERACTION HANDLERS
+    # Commands: activity group, setdefault, logchannel, prunechannel, list, info, prune, stop
     # ──────────────────────────────────────────────────────────────────────────
-
-    async def _handle_public_join(self, interaction: discord.Interaction, iid: str):
-        """User clicked Public Join."""
-        insts = await self.config.guild(interaction.guild).instances()
-        inst = insts.get(iid)
-        if not inst or inst["status"] != "OPEN":
-            return await interaction.response.send_message(
-                "That activity isn’t open any more.", ephemeral=True
-            )
-
-        me = str(interaction.user.id)
-        if me in inst["participants"]:
-            return await interaction.response.send_message(
-                "You’re already in this activity.", ephemeral=True
-            )
-
-        # ACK
-        await interaction.response.defer(ephemeral=True)
-
-        # Update
-        inst["participants"].append(me)
-        insts[iid] = inst
-        await self.config.guild(interaction.guild).instances.set(insts)
-
-        # Edit the embed & view
-        ch = interaction.guild.get_channel(inst["channel_id"])
-        msg = await ch.fetch_message(inst["message_ids"]["public"])
-        new_embed = self._build_embed(inst, interaction.guild)
-        new_view = PublicActivityView(self, iid)
-        await msg.edit(embed=new_embed, view=new_view)
-
-        # Followup
-        await interaction.followup.send("✅ You have joined 🎉", ephemeral=True)
-
-
-    async def _handle_public_leave(self, interaction: discord.Interaction, iid: str):
-        """User clicked Public Leave."""
-        insts = await self.config.guild(interaction.guild).instances()
-        inst = insts.get(iid)
-        if not inst or inst["status"] != "OPEN":
-            return await interaction.response.send_message(
-                "That activity isn’t open any more.", ephemeral=True
-            )
-
-        me = str(interaction.user.id)
-        if me not in inst["participants"]:
-            return await interaction.response.send_message(
-                "You’re not in this activity.", ephemeral=True
-            )
-
-        # ACK
-        await interaction.response.defer(ephemeral=True)
-
-        # Update
-        inst["participants"].remove(me)
-        insts[iid] = inst
-        await self.config.guild(interaction.guild).instances.set(insts)
-
-        # Edit embed & view
-        ch = interaction.guild.get_channel(inst["channel_id"])
-        msg = await ch.fetch_message(inst["message_ids"]["public"])
-        new_embed = self._build_embed(inst, interaction.guild)
-        new_view = PublicActivityView(self, iid)
-        await msg.edit(embed=new_embed, view=new_view)
-
-        # Followup
-        await interaction.followup.send("✅ You have left.", ephemeral=True)
-
-
-    async def _handle_private_join(self, interaction: discord.Interaction, iid: str, user_id: int):
-        """User clicked Join in their private-DM manage view."""
-        if interaction.user.id != user_id:
-            return await interaction.response.send_message("This button isn’t for you.", ephemeral=True)
-
-        insts = await self.config.guild(interaction.guild).instances()
-        inst = insts.get(iid)
-        if not inst or inst["status"] != "OPEN":
-            return await interaction.response.send_message("That activity isn’t open any more.", ephemeral=True)
-
-        me = str(user_id)
-        if me in inst["participants"]:
-            return await interaction.response.send_message("You’re already in.", ephemeral=True)
-
-        await interaction.response.defer(ephemeral=True)
-        inst["participants"].append(me)
-        insts[iid] = inst
-        await self.config.guild(interaction.guild).instances.set(insts)
-
-        # Update *this DM* embed
-        new_embed = self._build_embed(inst, interaction.guild)
-        await interaction.message.edit(embed=new_embed)
-
-        await interaction.followup.send("✅ You have re-joined.", ephemeral=True)
-
-
-    async def _handle_private_leave(self, interaction: discord.Interaction, iid: str, user_id: int):
-        """User clicked Leave in their private-DM manage view."""
-        if interaction.user.id != user_id:
-            return await interaction.response.send_message("This button isn’t for you.", ephemeral=True)
-
-        insts = await self.config.guild(interaction.guild).instances()
-        inst = insts.get(iid)
-        if not inst or inst["status"] != "OPEN":
-            return await interaction.response.send_message("That activity isn’t open any more.", ephemeral=True)
-
-        me = str(user_id)
-        if me not in inst["participants"]:
-            return await interaction.response.send_message("You’re not in.", ephemeral=True)
-
-        await interaction.response.defer(ephemeral=True)
-        inst["participants"].remove(me)
-        insts[iid] = inst
-        await self.config.guild(interaction.guild).instances.set(insts)
-
-        # Update *this DM* embed
-        new_embed = self._build_embed(inst, interaction.guild)
-        await interaction.message.edit(embed=new_embed)
-
-        await interaction.followup.send("✅ You have left.", ephemeral=True)
-
-
-    async def _handle_rsvp(self, interaction: discord.Interaction, iid: str, target_id: int, accepted: bool):
-        """User clicked Accept/Decline on an RSVP invite."""
-        if interaction.user.id != target_id:
-            return await interaction.response.send_message("This RSVP isn’t for you.", ephemeral=True)
-
-        insts = await self.config.guild(interaction.guild).instances()
-        inst = insts.get(iid)
-        if not inst or inst["status"] != "SCHEDULED":
-            return await interaction.response.send_message("That activity isn’t scheduled any more.", ephemeral=True)
-
-        await interaction.response.defer(ephemeral=True)
-        state = "ACCEPTED" if accepted else "DECLINED"
-        inst["rsvps"][str(target_id)] = state
-        insts[iid] = inst
-        await self.config.guild(interaction.guild).instances.set(insts)
-
-        # disable the RSVP buttons
-        await interaction.message.edit(view=None)
-        if accepted:
-            await interaction.followup.send("✅ You have accepted the RSVP.", ephemeral=True)
-        else:
-            await interaction.followup.send("❌ You have declined the RSVP.", ephemeral=True)
-
-
-    async def _handle_reminder_leave(self, interaction: discord.Interaction, iid: str, target_id: int):
-        """User clicked Leave on a reminder DM."""
-        if interaction.user.id != target_id:
-            return await interaction.response.send_message("This reminder isn’t for you.", ephemeral=True)
-
-        insts = await self.config.guild(interaction.guild).instances()
-        inst = insts.get(iid)
-        if not inst or inst["status"] != "OPEN":
-            return await interaction.response.send_message("That activity isn’t open any more.", ephemeral=True)
-
-        await interaction.response.defer(ephemeral=True)
-        me = str(target_id)
-        if me in inst["participants"]:
-            inst["participants"].remove(me)
-            insts[iid] = inst
-            await self.config.guild(interaction.guild).instances.set(insts)
-
-        # disable the reminder button
-        await interaction.message.edit(view=None)
-        await interaction.followup.send("✅ You have left (via reminder).", ephemeral=True)
-
-
-    async def _handle_invite_accept(self, interaction: discord.Interaction, iid: str, target_id: int):
-        """User clicked Accept on a live private invite."""
-        if interaction.user.id != target_id:
-            return await interaction.response.send_message("This invite isn’t for you.", ephemeral=True)
-
-        insts = await self.config.guild(interaction.guild).instances()
-        inst = insts.get(iid)
-        if not inst or inst["status"] != "OPEN":
-            return await interaction.response.send_message("That activity isn’t open any more.", ephemeral=True)
-
-        me = str(target_id)
-        if me in inst["participants"]:
-            return await interaction.response.send_message("You’re already in.", ephemeral=True)
-
-        await interaction.response.defer(ephemeral=True)
-        inst["participants"].append(me)
-        insts[iid] = inst
-        await self.config.guild(interaction.guild).instances.set(insts)
-
-        # disable the invite buttons
-        await interaction.message.edit(view=None)
-
-        # send them their manage‐DM
-        user = interaction.user
-        dm = await user.create_dm()
-        e2 = self._build_embed(inst, interaction.guild)
-        v2 = PrivateManageView(self, iid, target_id)
-        man_msg = await dm.send(embed=e2, view=v2)
-        inst["message_ids"].setdefault("manages", {})[me] = man_msg.id
-        self.bot.add_view(v2, message_id=man_msg.id)
-        await self.config.guild(interaction.guild).instances.set(insts)
-
-        await interaction.followup.send("✅ You’ve accepted! Check your DMs for management options.", ephemeral=True)
-
-
-    async def _handle_invite_decline(self, interaction: discord.Interaction, iid: str, target_id: int):
-        """User clicked Decline on a live private invite."""
-        if interaction.user.id != target_id:
-            return await interaction.response.send_message("This invite isn’t for you.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True)
-        await interaction.message.edit(view=None)
-        await interaction.followup.send("❌ You’ve declined the invite.", ephemeral=True)
-
-
-    async def _handle_invite_reply(
-        self,
-        interaction: discord.Interaction,
-        iid: str,
-        target_id: int,
-        user_message: str,
-    ):
-        """User submitted the Reply‐to‐owner modal."""
-        insts = await self.config.guild(interaction.guild).instances()
-        inst = insts.get(iid)
-        if not inst:
-            return
-        owner = self.bot.get_user(inst["owner_id"]) or await self.bot.fetch_user(inst["owner_id"])
-        if owner:
-            await owner.send(
-                f"📨 **Reply from {interaction.user}** on **{inst['title']}** (`{iid}`):\n> {user_message}"
-            )
-
-
-    async def _handle_extend(self, interaction: discord.Interaction, iid: str):
-        """Owner clicked Extend 12h in their DM."""
-        insts = await self.config.instances()  # typo in original? Should be guild‐scoped. We'll find the guild quickly:
-        # Find the guild & inst
-        guild = None
-        inst = None
-        for g in self.bot.guilds:
-            data = await self.config.guild(g).instances()
-            if iid in data:
-                guild = g
-                inst = data[iid]
-                insts = data
-                break
-        if not inst or inst["status"] != "ENDED":
-            return await interaction.response.send_message("That activity isn’t in an ended state.", ephemeral=True)
-        if interaction.user.id != inst["owner_id"]:
-            return await interaction.response.send_message("Only the owner can extend.", ephemeral=True)
-
-        await interaction.response.defer(ephemeral=True)
-        now = time.time()
-        inst["status"] = "OPEN"
-        inst["end_time"] = now + 12 * 3600
-        insts[iid] = inst
-        await self.config.guild(guild).instances.set(insts)
-
-        # Restore public view if public
-        if inst["public"] and inst["message_ids"].get("public"):
-            ch = guild.get_channel(inst["channel_id"])
-            try:
-                msg = await ch.fetch_message(inst["message_ids"]["public"])
-                new_embed = self._build_embed(inst, guild)
-                new_view = PublicActivityView(self, iid)
-                await msg.edit(embed=new_embed, view=new_view)
-                self.bot.add_view(new_view, message_id=msg.id)
-            except:
-                pass
-
-        await interaction.followup.send(
-            f"✅ Extended another 12 h! It will now end <t:{int(inst['end_time'])}:R>.", ephemeral=True
-        )
-
-
-    async def _handle_finalize(self, interaction: discord.Interaction, iid: str):
-        """Owner clicked Finalize now in their DM."""
-        # Find guild & inst
-        guild = None
-        inst = None
-        for g in self.bot.guilds:
-            data = await self.config.guild(g).instances()
-            if iid in data:
-                guild = g
-                inst = data[iid]
-                break
-        if not inst or inst["status"] == "ENDED":
-            return await interaction.response.send_message("That activity is already ended.", ephemeral=True)
-        if interaction.user.id != inst["owner_id"]:
-            return await interaction.response.send_message("Only the owner can finalize.", ephemeral=True)
-
-        await interaction.response.defer(ephemeral=True)
-        inst["status"] = "ENDED"
-        data[iid] = inst
-        await self.config.guild(guild).instances.set(data)
-
-        # remove public view
-        if inst["public"] and inst["message_ids"].get("public"):
-            ch = guild.get_channel(inst["channel_id"])
-            try:
-                msg = await ch.fetch_message(inst["message_ids"]["public"])
-                await msg.edit(embed=self._build_embed(inst, guild), view=None)
-            except:
-                pass
-
-        # remove all private manage DMs
-        for uid_str, mid in inst["message_ids"].get("manages", {}).items():
-            uid = int(uid_str)
-            user = self.bot.get_user(uid)
-            if user:
-                try:
-                    dm = user.dm_channel or await user.create_dm()
-                    await dm.edit_message(mid, view=None)
-                except:
-                    pass
-
-        await interaction.followup.send("✅ Activity finalized.", ephemeral=True)
-
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # COMMANDS (UNCHANGED from your original file, including templates & start)
-    # ──────────────────────────────────────────────────────────────────────────
-
     @commands.group(name="activity", invoke_without_command=True)
     @commands.guild_only()
     async def activity(self, ctx):
@@ -1099,7 +809,10 @@ class Activities(commands.Cog):
     @activity.command(name="prune")
     @checks.guildowner()
     async def prune_activities(self, ctx, status: str = "ENDED", older_than: int = None):
-        """Manually prune activities by status and optional minimum age (days)."""
+        """
+        Manually prune activities by status and optional minimum age (days).
+        Does NOT delete any channel messages; preserves history.
+        """
         insts = await self.config.guild(ctx.guild).instances()
         now = time.time()
         removed = []
@@ -1130,7 +843,7 @@ class Activities(commands.Cog):
         insts[full] = inst
         await self.config.guild(ctx.guild).instances.set(insts)
 
-        # Remove public buttons
+        # Remove public buttons if present
         pm = inst["message_ids"].get("public")
         cid = inst.get("channel_id")
         if pm and cid:
@@ -1148,7 +861,9 @@ class Activities(commands.Cog):
             f"{ctx.author.mention} manually stopped `{full}` (“{inst['title']}”)."
         )
 
-
+    # ──────────────────────────────────────────────────────────────────────────
+    # Templates: save, list, remove
+    # ──────────────────────────────────────────────────────────────────────────
     @activity.group(name="template", invoke_without_command=True)
     @checks.guildowner()
     async def template(self, ctx):
@@ -1158,14 +873,125 @@ class Activities(commands.Cog):
     @template.command(name="save")
     @checks.guildowner()
     async def template_save(self, ctx, name: str):
-        # …exactly your template wizard as before…
-        # (I left this completely unchanged.)
+        """
+        Save a template with title, description, public/private, destination,
+        channel or DM targets, max slots, and schedule.
+        """
+        name = name.lower()
+        existing = await self.config.guild(ctx.guild).templates()
+        if name in existing:
+            return await ctx.send("That template already exists.")
+        await ctx.send("**Template Setup:** 300s/question; type `skip` to omit optional.")
+        def check(m): return m.author == ctx.author and m.channel == ctx.channel
 
-        await ctx.send("❗ Template wizard not shown here for brevity.")
-        # paste your original template‐save code…
+        try:
+            # 1) Title
+            await ctx.send("1) Title:")
+            m = await self.bot.wait_for("message", check=check, timeout=300)
+            title = m.content.strip()[:100]; await m.add_reaction("✅")
+
+            # 2) Description
+            await ctx.send("2) Description (or `skip`):")
+            m = await self.bot.wait_for("message", check=check, timeout=300)
+            desc = "" if m.content.lower().startswith("skip") else m.content.strip()[:500]
+            await m.add_reaction("✅")
+
+            # 3) Destination
+            await ctx.send("3) Destination? Text or #channel mention or `skip`:")
+            while True:
+                m = await self.bot.wait_for("message", check=check, timeout=120)
+                txt = m.content.strip()
+                if txt.lower().startswith("skip"):
+                    dest = None; await m.add_reaction("✅"); break
+                dest = txt; await m.add_reaction("✅"); break
+
+            # 4) Public or Private
+            await ctx.send("4) Public or Private? (`public`/`private`):")
+            while True:
+                m = await self.bot.wait_for("message", check=check, timeout=120)
+                v = m.content.strip().lower()
+                if v in ("public","p","private","priv"):
+                    public = v.startswith("p") and not v.startswith("pr")
+                    await m.add_reaction("✅"); break
+                await ctx.send("Invalid; type `public` or `private`.")
+
+            channel_id = None
+            dm_targets = []
+            if public:
+                await ctx.send("5) Channel? Mention it or type `default`:")
+                while True:
+                    m = await self.bot.wait_for("message", check=check, timeout=120)
+                    txt = m.content.strip().lower()
+                    if txt.startswith("default"):
+                        channel_id = await self.config.guild(ctx.guild).default_channel_id()
+                        await m.add_reaction("✅"); break
+                    if m.channel_mentions:
+                        channel_id = m.channel_mentions[0].id
+                        await m.add_reaction("✅"); break
+                    await ctx.send("Invalid; mention a channel or `default`.")
+            else:
+                await ctx.send("5) DM whom? Mention users/role or `all`:")
+                while True:
+                    m = await self.bot.wait_for("message", check=check, timeout=120)
+                    txt = m.content.lower()
+                    if txt.startswith("all"):
+                        dm_targets = [u.id for u in ctx.guild.members if not u.bot]
+                        await m.add_reaction("✅"); break
+                    if m.role_mentions:
+                        dm_targets = [u.id for u in m.role_mentions[0].members if not u.bot]
+                        await m.add_reaction("✅"); break
+                    if m.mentions:
+                        dm_targets = [u.id for u in m.mentions if not u.bot]
+                        await m.add_reaction("✅"); break
+                    await ctx.send("Invalid; mention or `all`.")
+
+            # 6) Max slots
+            await ctx.send("6) Max slots? Number or `none`:")
+            while True:
+                m = await self.bot.wait_for("message", check=check, timeout=120)
+                txt = m.content.strip().lower()
+                if txt in ("none","n"):
+                    max_slots = None; await m.add_reaction("✅"); break
+                if txt.isdigit():
+                    max_slots = int(txt); await m.add_reaction("✅"); break
+                await ctx.send("Invalid; number or `none`.")
+
+            # 7) Scheduled
+            await ctx.send("7) Scheduled? `YYYY-MM-DD HH:MM` UTC or `skip`:")
+            while True:
+                m = await self.bot.wait_for("message", check=check, timeout=300)
+                txt = m.content.strip()
+                if txt.lower().startswith("skip"):
+                    scheduled_time = None; await m.add_reaction("✅"); break
+                try:
+                    dt = datetime.strptime(txt, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+                    ts = dt.timestamp()
+                    if ts < time.time():
+                        await ctx.send("Cannot schedule in the past; pick a future time.")
+                        continue
+                    scheduled_time = ts; await m.add_reaction("✅"); break
+                except:
+                    await ctx.send("Invalid; use `YYYY-MM-DD HH:MM` UTC or `skip`.")
+        except asyncio.TimeoutError:
+            return await ctx.send("❌ Timed out; aborting template setup.")
+
+        tpl = {
+            "title": title,
+            "description": desc,
+            "destination": dest,
+            "public": public,
+            "channel_id": channel_id,
+            "dm_targets": dm_targets,
+            "max_slots": max_slots,
+            "scheduled_time": scheduled_time,
+        }
+        existing[name] = tpl
+        await self.config.guild(ctx.guild).templates.set(existing)
+        await ctx.send(f"Template `{name}` saved.")
 
     @template.command(name="list")
     async def template_list(self, ctx):
+        """List saved templates."""
         tpls = await self.config.guild(ctx.guild).templates()
         if not tpls:
             return await ctx.send("No templates.")
@@ -1178,16 +1004,189 @@ class Activities(commands.Cog):
     @template.command(name="remove")
     @checks.guildowner()
     async def template_remove(self, ctx, name: str):
-        # …your original remove code…
+        """Remove a saved template."""
+        name = name.lower()
+        tpls = await self.config.guild(ctx.guild).templates()
+        if name not in tpls:
+            return await ctx.send("No such template.")
+        tpls.pop(name)
+        await self.config.guild(ctx.guild).templates.set(tpls)
+        await ctx.send(f"Template `{name}` removed.")
 
-        await ctx.send("❗ Remove‐template code not shown here for brevity.")
-
-
+    # ──────────────────────────────────────────────────────────────────────────
+    # Start / Schedule Command
+    # ──────────────────────────────────────────────────────────────────────────
     @activity.command(name="start")
     async def activity_start(self, ctx, template: str = None):
-        # …your original start‐wizard & dispatch code…
-        await ctx.send("❗ Start‐wizard code not shown here for brevity.")
+        """
+        Start or schedule an activity.
+        Optionally specify a saved template name to pre-fill fields.
+        """
+        guild, author = ctx.guild, ctx.author
+        tpls = await self.config.guild(guild).templates()
+        tpl = tpls.get(template.lower()) if (template and template.lower() in tpls) else None
+
+        inst = {}
+        if tpl:
+            inst.update(tpl)
+            if inst["public"] and not inst.get("channel_id"):
+                inst["channel_id"] = await self.config.guild(guild).default_channel_id()
+        else:
+            # Wizard
+            await ctx.send("**Activity Wizard** (300s/question; type `skip` to omit optional)")
+            def check(m): return m.author==author and m.channel==ctx.channel
+
+            # 1) Title
+            await ctx.send("1) Title:")
+            while True:
+                m = await self.bot.wait_for("message", check=check, timeout=300)
+                title = m.content.strip()
+                if title:
+                    inst["title"] = title[:100]; await m.add_reaction("✅"); break
+                await ctx.send("Title cannot be empty.")
+
+            # 2) Description
+            await ctx.send("2) Description (or `skip`):")
+            m = await self.bot.wait_for("message", check=check, timeout=300)
+            inst["description"] = "" if m.content.lower().startswith("skip") else m.content.strip()[:500]
+            await m.add_reaction("✅")
+
+            # 3) Destination
+            await ctx.send("3) Destination? Text or #channel mention or `skip`:")
+            while True:
+                m = await self.bot.wait_for("message", check=check, timeout=120)
+                txt = m.content.strip()
+                if txt.lower().startswith("skip"):
+                    inst["destination"]=None; await m.add_reaction("✅"); break
+                inst["destination"]=txt; await m.add_reaction("✅"); break
+
+            # 4) Public/private
+            await ctx.send("4) Public or Private? (`public`/`private`):")
+            while True:
+                m = await self.bot.wait_for("message", check=check, timeout=120)
+                v=m.content.strip().lower()
+                if v in ("public","p","private","priv"):
+                    inst["public"]=v.startswith("p") and not v.startswith("pr")
+                    await m.add_reaction("✅"); break
+                await ctx.send("Invalid; type `public` or `private`.")
+
+            # 5a) Channel if public
+            if inst["public"]:
+                await ctx.send("5) Channel? Mention or `default`:")
+                while True:
+                    m = await self.bot.wait_for("message", check=check, timeout=120)
+                    txt=m.content.strip().lower()
+                    if txt.startswith("default"):
+                        inst["channel_id"]=await self.config.guild(guild).default_channel_id()
+                        await m.add_reaction("✅"); break
+                    if m.channel_mentions:
+                        inst["channel_id"]=m.channel_mentions[0].id
+                        await m.add_reaction("✅"); break
+                    await ctx.send("Invalid; mention or `default`.")
+            else:
+                # 5b) DM targets
+                await ctx.send("5) DM whom? Mention users/role or `all`:")
+                while True:
+                    m=await self.bot.wait_for("message", check=check, timeout=120)
+                    txt=m.content.lower()
+                    if txt.startswith("all"):
+                        inst["dm_targets"]=[u.id for u in guild.members if not u.bot]
+                        await m.add_reaction("✅"); break
+                    if m.role_mentions:
+                        inst["dm_targets"]=[u.id for u in m.role_mentions[0].members if not u.bot]
+                        await m.add_reaction("✅"); break
+                    if m.mentions:
+                        inst["dm_targets"]=[u.id for u in m.mentions if not u.bot]
+                        await m.add_reaction("✅"); break
+                    await ctx.send("Invalid; mention or `all`.")
+
+            # 6) Max slots
+            await ctx.send("6) Max slots? Number or `none`:")
+            while True:
+                m=await self.bot.wait_for("message", check=check, timeout=120)
+                txt=m.content.strip().lower()
+                if txt in ("none","n"):
+                    inst["max_slots"]=None; await m.add_reaction("✅"); break
+                if txt.isdigit():
+                    inst["max_slots"]=int(txt); await m.add_reaction("✅"); break
+                await ctx.send("Invalid; number or `none`.")
+
+            # 7) Scheduled
+            await ctx.send("7) Scheduled? `YYYY-MM-DD HH:MM` UTC or `skip`:")
+            while True:
+                m=await self.bot.wait_for("message", check=check, timeout=300)
+                txt=m.content.strip()
+                if txt.lower().startswith("skip"):
+                    inst["scheduled_time"]=None; await m.add_reaction("✅"); break
+                try:
+                    dt=datetime.strptime(txt,"%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+                    ts=dt.timestamp()
+                    if ts<time.time():
+                        await ctx.send("Cannot schedule in the past.")
+                        continue
+                    inst["scheduled_time"]=ts; await m.add_reaction("✅"); break
+                except:
+                    await ctx.send("Invalid; use `YYYY-MM-DD HH:MM` UTC or `skip`.")
+
+        # Common fields
+        now=time.time()
+        existing=await self.config.guild(guild).instances()
+        iid=generate_id(existing.keys())
+        status="SCHEDULED" if inst.get("scheduled_time") and inst["scheduled_time"]>now else "OPEN"
+        inst.update({
+            "owner_id": author.id,
+            "created_at": now,
+            "status": status,
+            "participants": [],
+            "rsvps": {},
+            "message_ids": {"public":None,"extend":None,"invites":{}, "rsvps":{}, "reminders":{}, "manages":{}},
+            "channel_id": inst.get("channel_id"),
+            "destination": inst.get("destination"),
+            "max_slots": inst.get("max_slots"),
+            "scheduled_time": inst.get("scheduled_time"),
+            "end_time": now+12*3600,
+        })
+        existing[iid]=inst
+        await self.config.guild(guild).instances.set(existing)
+
+        if status=="SCHEDULED":
+            delay=inst["scheduled_time"]-now
+            self.bot.loop.create_task(self._schedule_start(guild.id,iid,delay))
+            human=f"<t:{int(inst['scheduled_time'])}:F>"
+            if inst["public"]:
+                await ctx.send(f"✅ Scheduled public `{iid}` for {human}.")
+                await self._log(guild,f"{author.mention} scheduled public `{iid}` for {human}.")
+            else:
+                # RSVP invites
+                fails=[]
+                for uid in inst["dm_targets"]:
+                    try:
+                        user=self.bot.get_user(uid) or await self.bot.fetch_user(uid)
+                        dm=await user.create_dm()
+                        e=discord.Embed(
+                            title=f"RSVP: {inst['title']}",
+                            description=inst.get("description",""),
+                            color=discord.Color.blurple()
+                        )
+                        e.add_field(name="Scheduled for",value=human,inline=False)
+                        view=InviteView(self,iid,uid,rsvp=True)
+                        msg=await dm.send(embed=e,view=view)
+                        inst["message_ids"]["rsvps"][str(uid)]=msg.id
+                        inst["rsvps"][str(uid)]="PENDING"
+                        self.bot.add_view(view,message_id=msg.id)
+                    except:
+                        fails.append(uid)
+                await self.config.guild(guild).instances.set(existing)
+                reply=f"✅ Scheduled private `{iid}`; RSVP invites sent."
+                if fails:
+                    reply+= "\nFailed to DM: "+" ".join(f"<@{u}>" for u in fails)
+                await ctx.send(reply)
+                await self._log(guild,f"{author.mention} scheduled private `{iid}`; failed to DM {fails}.")
+            return
+
+        # Immediate OPEN
+        await self._dispatch_open(guild,iid,ctx)
 
 
 async def setup(bot: Red):
-    await bot.add_cog(Activities(bot))
+    await bot.add_cog(Activities(bot))   
