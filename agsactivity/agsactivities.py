@@ -1204,18 +1204,31 @@ class Activities(commands.Cog):
         guild = interaction.guild
         if not guild:
             return await interaction.response.send_message("Guild context missing.", ephemeral=True)
+
         insts = await self.config.guild(guild).instances()
         inst = insts.get(iid)
         if not inst or inst["status"] != "OPEN" or not inst["public"]:
             return await interaction.response.send_message("You can’t join that.", ephemeral=True)
+
         uid = interaction.user.id
         if uid in inst["participants"]:
             return await interaction.response.send_message("You’ve already joined.", ephemeral=True)
+
+        # ───── enforce slot limit ─────
+        max_slots = inst.get("max_slots")
+        if max_slots is not None and len(inst["participants"]) >= max_slots:
+            return await interaction.response.send_message(
+                f"⛔ Sorry, this activity is full ({max_slots}/{max_slots} slots).",
+                ephemeral=True
+            )
+
+        # ───── now actually join ─────
         inst["participants"].append(uid)
         await self.config.guild(guild).instances.set(insts)
 
+        # edit the public embed to show new slots
         try:
-            ch = guild.get_channel(inst["channel_id"])
+            ch     = guild.get_channel(inst["channel_id"])
             msg_id = inst["message_ids"].get("public")
             if ch and msg_id:
                 msg = await ch.fetch_message(msg_id)
@@ -1223,7 +1236,7 @@ class Activities(commands.Cog):
         except Exception:
             log.exception("Failed to update public embed after join")
 
-        await interaction.response.send_message("✅ You have joined!", ephemeral=True)
+        return await interaction.response.send_message("✅ You have joined!", ephemeral=True)
 
     async def _handle_public_leave(self, interaction: discord.Interaction, iid: str):
         guild = interaction.guild
@@ -1262,15 +1275,27 @@ class Activities(commands.Cog):
         if user_id in inst["participants"]:
             return await interaction.response.send_message("Already joined.", ephemeral=False)
 
+        # ───── enforce slot limit ─────
+        max_slots = inst.get("max_slots")
+        if max_slots is not None and len(inst["participants"]) >= max_slots:
+            return await interaction.response.send_message(
+                f"⛔ Sorry, this activity is full ({max_slots}/{max_slots} slots).",
+                ephemeral=False
+            )
+
+        # ───── now actually join ─────
         inst["participants"].append(user_id)
         await self.config.guild(guild).instances.set(insts)
 
+        # update or send the manage‐DM
         embed = self._build_embed(inst, guild)
-        view = PrivateManageView(self, iid, user_id)
+        view  = PrivateManageView(self, iid, user_id)
         try:
+            # if a DM-manage message existed, edit it
             await interaction.response.edit_message(embed=embed, view=view)
         except discord.HTTPException:
-            dm = await interaction.user.create_dm()
+            # otherwise send a new one
+            dm     = await interaction.user.create_dm()
             man_msg = await dm.send(embed=embed, view=view)
             inst["message_ids"].setdefault("manages", {})[str(user_id)] = man_msg.id
             await self.config.guild(guild).instances.set(insts)
