@@ -2,5 +2,6 @@
 
 from .agshousingscraper import AGSHousingScraper
 
-def setup(bot):
-    bot.add_cog(AGSHousingScraper(bot))
+async def setup(bot):
+    """This is awaited by Red when you do [p]load agshousingscraper."""
+    await bot.add_cog(AGSHousingScraper(bot))
