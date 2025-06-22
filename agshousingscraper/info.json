@@ -1,0 +1,7 @@
+{
+  "name": "agshousingscraper",
+  "version": "1.0.0",
+  "description": "Monitor a website for new social-housing posts and alert your server",
+  "author": ["Five"],
+  "requirements": ["beautifulsoup4", "aiohttp", "selenium"]
+}
