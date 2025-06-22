@@ -1,18 +1,11 @@
-import asyncio
-import aiohttp
-import async_timeout
+import asyncio, os, tempfile, re, hashlib
+import aiohttp, async_timeout
 import discord
-import hashlib
-import re
 from bs4 import BeautifulSoup
-from discord.ext import tasks
-from redbot.core import commands, Config, checks
-from redbot.core.utils import chat_formatting as cf
-
-# Optional Selenium imports for screenshots:
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-import tempfile, os
+from redbot.core import commands, Config, checks
+from redbot.core.utils import chat_formatting as cf
 
 DEFAULT_SELECTOR = "section:has(h2:contains('Available Houses'))"
 
@@ -33,30 +26,172 @@ class AGSHousingScraper(commands.Cog):
             use_section_hash=False,
             use_screenshot=False,
         )
-        self._tasks = {}
+        self.monitor_tasks = {}
 
     def cog_unload(self):
-        for t in self._tasks.values():
-            t.cancel()
+        for task in self.monitor_tasks.values():
+            task.cancel()
 
-    async def ensure_task(self, guild):
-        if guild.id in self._tasks:
-            return
-        interval = await self.config.guild(guild).poll_interval()
-        loop = tasks.Loop(self.check_site, seconds=interval, reconnect=True)
-        loop.start(guild)
-        self._tasks[guild.id] = loop
+    async def _monitor_loop(self, guild):
+        await self.bot.wait_until_ready()
+        settings = self.config.guild(guild)
+        while True:
+            try:
+                await self.check_site(guild)
+            except Exception as e:
+                self.bot.log.exception(f"[agshousingscraper:{guild.name}] monitor error")
+            interval = await settings.poll_interval()
+            await asyncio.sleep(interval)
 
-    @tasks.loop(seconds=300.0)
     async def check_site(self, guild):
+        """Fetch the page, then either hash-detect or per-post detect & alert."""
         settings = await self.config.guild(guild).all()
         url = settings["url"]
         selector = settings["selector"]
-        # …[fetch page, parse with BeautifulSoup]…
-        # …[either do hash-mode or per-post link detection as in the earlier example]…
-        # …[on new posts or changes call self.dispatch_alerts()]…
+        use_hash = settings["use_section_hash"]
+        use_ss = settings["use_screenshot"]
 
-    # …[All helper methods: scrape_post, dispatch_alerts, capture_screenshot]…
+        # 1) fetch
+        try:
+            async with aiohttp.ClientSession() as session:
+                with async_timeout.timeout(30):
+                    r = await session.get(url, headers={"User-Agent":"Mozilla/5.0"})
+                    html = await r.text()
+        except Exception:
+            self.bot.log.warning(f"[agshousingscraper:{guild.name}] fetch failed")
+            return
+
+        soup = BeautifulSoup(html, "html.parser")
+
+        # 2) Section-hash mode?
+        if use_hash:
+            sec = soup.select_one(selector)
+            if not sec:
+                return
+            new_hash = hashlib.sha256(str(sec).encode("utf-8")).hexdigest()
+            if new_hash != settings["last_hash"]:
+                await self.config.guild(guild).last_hash.set(new_hash)
+                embed = discord.Embed(
+                    title="Section changed!",
+                    description="The monitored section has been updated.",
+                    color=discord.Color.green(),
+                    timestamp=discord.utils.utcnow()
+                )
+                ss = await self.capture_screenshot(url, selector) if use_ss else None
+                await self.dispatch_alert(guild, None, embed, ss)
+            return
+
+        # 3) Per-post detection
+        section = soup.select_one(selector)
+        if not section:
+            return
+        # skip the “empty state” box
+        if section.select_one("[data-hook='empty-state-container']"):
+            return
+
+        # gather candidate URLs
+        candidates = set()
+        for a in section.find_all("a", href=True):
+            href = a["href"]
+            txt = a.get_text("", True).lower()
+            if "blog" in href.lower() or "read more" in txt:
+                candidates.add(href)
+        # fallback
+        if not candidates:
+            for art in section.find_all(["article", "div"], class_=re.compile(r"blog-post", re.I)):
+                a = art.find("a", href=True)
+                if a:
+                    candidates.add(a["href"])
+
+        seen = set(settings["seen_posts"])
+        new_posts = candidates - seen
+        if not new_posts:
+            return
+
+        # save
+        await self.config.guild(guild).seen_posts.set(list(seen | new_posts))
+
+        # alert on each new link
+        for href in new_posts:
+            title, snippet, thumb = await self.scrape_post(href)
+            embed = discord.Embed(
+                title=title or "New Housing Post",
+                url=href,
+                description=snippet or "No snippet available.",
+                color=discord.Color.blue(),
+                timestamp=discord.utils.utcnow()
+            )
+            if thumb:
+                embed.set_thumbnail(url=thumb)
+            ss = await self.capture_screenshot(href) if use_ss else None
+            await self.dispatch_alert(guild, None, embed, ss)
+
+    async def scrape_post(self, url):
+        """Fetch a post page and pull out a title, snippet & og:image."""
+        title = snippet = thumb = None
+        try:
+            async with aiohttp.ClientSession() as session:
+                with async_timeout.timeout(15):
+                    r = await session.get(url, headers={"User-Agent":"Mozilla/5.0"})
+                    txt = await r.text()
+        except:
+            return title, snippet, thumb
+
+        s = BeautifulSoup(txt, "html.parser")
+        h = s.find(re.compile(r"h[1-3]"))
+        if h:
+            title = h.get_text(strip=True)
+        p = s.find("p")
+        if p:
+            snippet = p.get_text(strip=True)[:200] + "…"
+        og = s.find("meta", property="og:image")
+        if og and og.get("content"):
+            thumb = og["content"]
+        return title, snippet, thumb
+
+    async def dispatch_alert(self, guild, content, embed, screenshot_path=None):
+        cfg = await self.config.guild(guild).all()
+        ch = guild.get_channel(cfg["channel_id"]) if cfg["channel_id"] else None
+        usr = self.bot.get_user(cfg["dm_user_id"]) if cfg["dm_user_id"] else None
+
+        if cfg["role_id"] and ch:
+            content = f"<@&{cfg['role_id']}>"
+
+        file = None
+        if screenshot_path:
+            file = discord.File(screenshot_path, filename="screenshot.png")
+            embed.set_image(url="attachment://screenshot.png")
+
+        if ch:
+            await ch.send(content=content, embed=embed, file=file)
+        if usr:
+            try:
+                await usr.send(embed=embed, file=file)
+            except:
+                pass
+
+        if file and os.path.exists(screenshot_path):
+            os.remove(screenshot_path)
+
+    async def capture_screenshot(self, url, css_selector=None):
+        """Headless Chrome screenshot of page or a specific element."""
+        opts = Options()
+        opts.add_argument("--headless")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--window-size=1280,2000")
+        driver = webdriver.Chrome(options=opts)
+        driver.get(url)
+        if css_selector:
+            try:
+                el = driver.find_element("css selector", css_selector)
+                driver.execute_script("arguments[0].scrollIntoView();", el)
+            except:
+                pass
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        driver.save_screenshot(tmp.name)
+        driver.quit()
+        return tmp.name
 
     # ─── Commands ───
 
@@ -65,66 +200,69 @@ class AGSHousingScraper(commands.Cog):
     async def agshousingscraper(self, ctx):
         """Manage the AGS Housing Scraper."""
         if not ctx.invoked_subcommand:
-            await ctx.send_help(ctx.command)
+            await ctx.send_help()
 
     @agshousingscraper.command()
     async def start(self, ctx):
-        """Start the monitor."""
-        await self.ensure_task(ctx.guild)
+        """Start monitoring this server."""
+        if ctx.guild.id in self.monitor_tasks:
+            return await ctx.send("Already running.")
+        task = self.bot.loop.create_task(self._monitor_loop(ctx.guild))
+        self.monitor_tasks[ctx.guild.id] = task
         await ctx.tick()
 
     @agshousingscraper.command()
     async def stop(self, ctx):
-        """Stop the monitor."""
-        t = self._tasks.pop(ctx.guild.id, None)
-        if t:
-            t.cancel()
-            await ctx.tick()
-        else:
-            await ctx.send("Not running.")
+        """Stop monitoring."""
+        task = self.monitor_tasks.pop(ctx.guild.id, None)
+        if not task:
+            return await ctx.send("Not running.")
+        task.cancel()
+        await ctx.tick()
 
     @agshousingscraper.command()
     async def status(self, ctx):
-        """Show current settings."""
+        """Show current settings & whether it’s running."""
         s = await self.config.guild(ctx.guild).all()
-        e = discord.Embed(title="AGS Housing Scraper Status", color=discord.Color.blue())
+        e = discord.Embed(title="AGS Housing Scraper Status", color=discord.Color.blurple())
         e.add_field(name="URL", value=s["url"], inline=False)
         e.add_field(name="Interval", value=f"{s['poll_interval']}s", inline=True)
         e.add_field(name="Selector", value=s["selector"], inline=True)
         e.add_field(name="Channel", value=f"<#{s['channel_id']}>" if s["channel_id"] else "None", inline=True)
         e.add_field(name="Role", value=f"<@&{s['role_id']}>" if s["role_id"] else "None", inline=True)
         e.add_field(name="DM User", value=f"<@{s['dm_user_id']}>" if s["dm_user_id"] else "None", inline=True)
-        e.add_field(name="Hash-mode", value=str(s["use_section_hash"]), inline=True)
+        e.add_field(name="Hash Mode", value=str(s["use_section_hash"]), inline=True)
         e.add_field(name="Screenshots", value=str(s["use_screenshot"]), inline=True)
         e.add_field(name="Seen Posts", value=str(len(s["seen_posts"])), inline=True)
+        e.add_field(name="Running", value=str(ctx.guild.id in self.monitor_tasks), inline=True)
         await ctx.send(embed=e)
 
     @agshousingscraper.command()
     async def seturl(self, ctx, url: str):
-        """Set the target URL."""
+        """Set the monitored URL."""
         await self.config.guild(ctx.guild).url.set(url)
         await ctx.tick()
 
     @agshousingscraper.command()
     async def interval(self, ctx, seconds: int):
-        """Set polling interval."""
+        """Set polling interval (seconds)."""
         await self.config.guild(ctx.guild).poll_interval.set(seconds)
-        # restart if running
-        t = self._tasks.pop(ctx.guild.id, None)
-        if t:
-            t.cancel()
-            await self.ensure_task(ctx.guild)
+        # if running, restart
+        task = self.monitor_tasks.pop(ctx.guild.id, None)
+        if task:
+            task.cancel()
+            self.bot.loop.create_task(self._monitor_loop(ctx.guild))
         await ctx.tick()
 
     @agshousingscraper.command()
     async def selector(self, ctx, *, css: str):
-        """Set CSS selector for the monitored section."""
+        """Set CSS selector for the section."""
         await self.config.guild(ctx.guild).selector.set(css)
         await ctx.tick()
 
     @agshousingscraper.command()
     async def channel(self, ctx, channel: discord.TextChannel):
-        """Set alert channel."""
+        """Set the alert channel."""
         await self.config.guild(ctx.guild).channel_id.set(channel.id)
         await ctx.tick()
 
@@ -154,7 +292,7 @@ class AGSHousingScraper(commands.Cog):
 
     @agshousingscraper.command()
     async def clear(self, ctx):
-        """Forget all seen posts."""
+        """Clear seen-post history."""
         await self.config.guild(ctx.guild).seen_posts.set([])
         await ctx.send("✅ Cleared history.")
 
