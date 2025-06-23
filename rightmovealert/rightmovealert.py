@@ -202,60 +202,54 @@ class RightmoveAlert(commands.Cog):
                         pass
 
     async def handle_listing(self, uid: int, listing: dict):
-        """Send alerts for a single listing to user DMs and alert channels."""
+        """Send alerts for a single listing, letting Discord auto-generate the link preview."""
         now_ts = int(datetime.datetime.now(self.tz).timestamp())
+        url = listing.get("url")
         embed = discord.Embed(
             title=listing.get("title", "Listing"),
-            url=listing.get("url")
+            url=url,
+            timestamp=datetime.datetime.fromtimestamp(now_ts, tz=self.tz)
         )
         embed.add_field(name="Price", value=f"£{listing.get('price')}", inline=True)
-        embed.add_field(name="Beds", value=str(listing.get("beds")), inline=True)
-        embed.add_field(name="Location", value=listing.get("location", "Unknown"), inline=False)
+        embed.add_field(name="Beds", value=str(listing.get('beds')), inline=True)
+        embed.add_field(name="Location", value=listing.get('location', "Unknown"), inline=False)
         embed.add_field(
             name="Scraped At",
             value=f"<t:{now_ts}:F> (<t:{now_ts}:R>)",
             inline=False
         )
-        file_bytes = listing.get("screenshot")
-        filename = f"{listing.get('id')}.png" if file_bytes else None
-        if file_bytes:
-            embed.set_image(url=f"attachment://{filename}")
 
+        # DM the user with the URL (Discord will auto-embed a preview) plus our embed
         user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
         if user:
             try:
-                if file_bytes:
-                    file_dm = discord.File(io.BytesIO(file_bytes), filename=filename)
-                    await user.send(embed=embed, file=file_dm)
-                else:
-                    await user.send(embed=embed)
+                await user.send(url, embed=embed)
             except:
                 await self.log_event(f"Failed to DM user {uid}")
 
+        # Send to each guild's alert channel, mention the user and include URL in content
         for guild in self.bot.guilds:
             member = guild.get_member(uid)
-            if member:
-                cfg = await self.config.guild(guild).all()
-                alert_ch_id = cfg.get("alert_channel")
-                if alert_ch_id:
-                    ch = self.bot.get_channel(alert_ch_id)
-                    if ch:
-                        try:
-                            if file_bytes:
-                                file_ch = discord.File(io.BytesIO(file_bytes), filename=filename)
-                                await ch.send(f"<@{uid}>", embed=embed, file=file_ch)
-                            else:
-                                await ch.send(f"<@{uid}>", embed=embed)
-                        except:
-                            await self.log_event(f"Failed to send alert to channel {alert_ch_id} for user {uid}")
-                log_ch_id = cfg.get("log_channel")
-                if log_ch_id:
-                    log_ch = self.bot.get_channel(log_ch_id)
-                    if log_ch:
-                        try:
-                            await log_ch.send(f"Alert for user {uid}: Listing {listing.get('id')} — <t:{now_ts}:R>")
-                        except:
-                            pass
+            if not member:
+                continue
+            cfg = await self.config.guild(guild).all()
+            alert_ch_id = cfg.get("alert_channel")
+            if alert_ch_id:
+                ch = self.bot.get_channel(alert_ch_id)
+                if ch:
+                    try:
+                        await ch.send(f"<@{uid}> {url}", embed=embed)
+                    except:
+                        await self.log_event(f"Failed to send alert to channel {alert_ch_id} for user {uid}")
+            # Also log the alert
+            log_ch_id = cfg.get("log_channel")
+            if log_ch_id:
+                log_ch = self.bot.get_channel(log_ch_id)
+                if log_ch:
+                    try:
+                        await log_ch.send(f"Alert for user {uid}: Listing {listing.get('id')} — <t:{now_ts}:R> {url}")
+                    except:
+                        pass
 
     @commands.group(name="rmalert", invoke_without_command=True)
     async def rmalert(self, ctx):
