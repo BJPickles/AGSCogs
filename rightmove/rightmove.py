@@ -280,8 +280,13 @@ class RightmoveCog(commands.Cog):
         await ctx.send("✅ Scrape unscheduled.")
 
     @rm.command(name="test")
-    async def rm_test(self, ctx):
-        """Run one manual scrape immediately."""
+    async def rm_test(self, ctx, channel: discord.TextChannel = None):
+        """
+        Run one manual scrape immediately.
+        Optionally pass a channel to override where embeds go.
+        """
+        # Ensure we have a target channel
+        self.target_channel = channel or self.target_channel or ctx.channel
         await ctx.send("🔄 Running manual scrape…")
         await self.do_scrape()
         await ctx.send("✅ Manual scrape done.")
