@@ -7,11 +7,13 @@ import discord
 from discord.ext import tasks
 from redbot.core import commands, Config
 
+from urllib.parse import quote
+
 from .scraper import RightmoveScraper, CaptchaError
 from .filter_utils import filter_listings
 
+# Silence Playwright debug spam
 logging.getLogger("playwright").setLevel(logging.CRITICAL)
-
 
 class RightmoveAlert(commands.Cog):
     """Alert guilds of new Rightmove listings from a fixed search URL."""
@@ -21,7 +23,7 @@ class RightmoveAlert(commands.Cog):
         self.scraper = RightmoveScraper()
         self.tz = pytz.timezone("Europe/London")
 
-        # per-guild settings
+        # Per-guild settings
         guild_defaults = {
             "search_url": None,
             "alert_channel": None,
@@ -34,7 +36,7 @@ class RightmoveAlert(commands.Cog):
             "blacklistleasehold": True,
             "seen": []
         }
-        # global metrics
+        # Global metrics
         global_defaults = {
             "listings_checked": 0,
             "matched": 0,
@@ -48,13 +50,14 @@ class RightmoveAlert(commands.Cog):
         self.config.register_guild(**guild_defaults)
         self.config.register_global(**global_defaults)
 
+        # Limit concurrent Playwright pages
         self.scrape_sem = asyncio.Semaphore(3)
         self._startup_logged = False
 
     async def cog_load(self):
         self.scraping_loop.start()
         self.daily_summary.start()
-        # Delay a startup‐log until the bot is ready
+        # Delay a startup log until the bot is fully ready
         self.bot.loop.create_task(self._delayed_startup_log())
 
     async def _delayed_startup_log(self):
@@ -72,11 +75,11 @@ class RightmoveAlert(commands.Cog):
     @tasks.loop(seconds=600)
     async def scraping_loop(self):
         """
-        Every 10 min:
-         1. Fetch each guild’s URL
-         2. Scrape via Playwright
-         3. Apply filters (maxprice, minbeds, keywords, customblacklist, leasehold)
-         4. Alert *all* new matches
+        Every 10 minutes:
+          1) Fetch each guild’s URL
+          2) Scrape via Playwright
+          3) Apply filters (maxprice, minbeds, keywords, etc.)
+          4) Alert all new matches
         """
         for guild in self.bot.guilds:
             cfg = await self.config.guild(guild).all()
@@ -87,7 +90,7 @@ class RightmoveAlert(commands.Cog):
 
             seen = set(cfg.get("seen", []))
 
-            # limit concurrent pages
+            # Bound the number of simultaneous Playwright pages
             async with self.scrape_sem:
                 try:
                     listings = await self.scraper.scrape_url(url)
@@ -98,50 +101,50 @@ class RightmoveAlert(commands.Cog):
                     await self.log_event(f"Error scraping guild {guild.id}: {e}")
                     continue
 
-            # update global counters
-            async with self.config.bot() as g:
+            # Update global counters
+            async with getattr(self.config, "global")() as g:
                 g["listings_checked"] += len(listings)
 
-            # apply filter_utils
+            # Apply filter_utils
             matches, blocked = filter_listings(listings, cfg)
-            async with self.config.bot() as g:
+            async with getattr(self.config, "global")() as g:
                 g["matched"] += len(matches)
                 g["blocked"] += blocked
 
-            # select brand-new
-            new_listings = [L for L in matches if L["id"] not in seen]
+            # Determine brand-new matches
+            new_listings = [l for l in matches if l["id"] not in seen]
             if not new_listings:
                 continue
 
-            # persist seen & count alerts
-            seen.update(L["id"] for L in new_listings)
+            # Persist seen and increment alert count
+            seen.update(l["id"] for l in new_listings)
             await self.config.guild(guild).seen.set(list(seen))
-            async with self.config.bot() as g:
+            async with getattr(self.config, "global")() as g:
                 g["alerts"] += len(new_listings)
 
-            # send each new listing
+            # Send each new listing
             for listing in new_listings:
                 await self.handle_listing(guild, listing)
 
     @tasks.loop(time=datetime.time(hour=23, minute=59))
     async def daily_summary(self):
-        """Every day at 23:59, post a summary embed to each guild’s summary_channel."""
+        """Every day at 23:59, post a summary embed to each guild’s summary channel."""
         now_ts = int(datetime.datetime.now(self.tz).timestamp())
-        g      = await self.config.bot()
-        scr    = g.get("listings_checked", 0)
-        mat    = g.get("matched", 0)
-        blk    = g.get("blocked", 0)
-        alr    = g.get("alerts", 0)
+        g      = await getattr(self.config, "global")()
+        scrps  = g.get("listings_checked", 0)
+        matched = g.get("matched", 0)
+        blocked = g.get("blocked", 0)
+        alerts  = g.get("alerts", 0)
 
         embed = discord.Embed(title="Rightmove Daily Summary")
-        embed.add_field(name="Scrapes Run",       value=str(scr), inline=True)
-        embed.add_field(name="Listings Matched",  value=str(mat), inline=True)
-        embed.add_field(name="Blocked by Blacklist", value=str(blk), inline=True)
-        embed.add_field(name="Alerts Sent",       value=str(alr), inline=True)
+        embed.add_field(name="Scrapes Run",          value=str(scrps),  inline=True)
+        embed.add_field(name="Listings Matched",     value=str(matched), inline=True)
+        embed.add_field(name="Blocked by Blacklist", value=str(blocked), inline=True)
+        embed.add_field(name="Alerts Sent",          value=str(alerts), inline=True)
         embed.add_field(
             name="Generated",
             value=f"<t:{now_ts}:F> (<t:{now_ts}:R>)",
-            inline=False
+            inline=False,
         )
 
         for guild in self.bot.guilds:
@@ -154,15 +157,15 @@ class RightmoveAlert(commands.Cog):
                     except:
                         pass
 
-        # reset counters
-        async with self.config.bot() as g2:
+        # Reset counters
+        async with getattr(self.config, "global")() as g2:
             g2["listings_checked"] = 0
             g2["matched"]          = 0
             g2["blocked"]          = 0
             g2["alerts"]           = 0
 
     async def log_event(self, message: str):
-        """Send a timestamped log to every guild’s log_channel (if set)."""
+        """Send a timestamped log to every guild’s log channel (if configured)."""
         now_ts = int(datetime.datetime.now(self.tz).timestamp())
         full   = f"{message} — <t:{now_ts}:F> (<t:{now_ts}:R>)"
         for guild in self.bot.guilds:
@@ -177,21 +180,21 @@ class RightmoveAlert(commands.Cog):
 
     async def handle_listing(self, guild, listing: dict):
         """
-        Build and send one listing embed into the guild’s alert_channel.
+        Build and send one listing embed into the guild’s alert channel.
         """
         ts = int(datetime.datetime.now(self.tz).timestamp())
         embed = discord.Embed(
             title=listing["title"],
             url=listing["url"],
-            timestamp=datetime.datetime.fromtimestamp(ts, tz=self.tz)
+            timestamp=datetime.datetime.fromtimestamp(ts, tz=self.tz),
         )
-        embed.add_field(name="Price",    value=f"£{listing['price']}", inline=True)
-        embed.add_field(name="Beds",     value=str(listing["beds"]),    inline=True)
-        embed.add_field(name="Location", value=listing["location"],    inline=False)
+        embed.add_field(name="Price", value=f"£{listing['price']}", inline=True)
+        embed.add_field(name="Beds",  value=str(listing["beds"]),    inline=True)
+        embed.add_field(name="Location", value=listing["location"], inline=False)
         embed.add_field(
             name="Scraped At",
             value=f"<t:{ts}:F> (<t:{ts}:R>)",
-            inline=False
+            inline=False,
         )
 
         ac = await self.config.guild(guild).alert_channel()
@@ -220,9 +223,22 @@ class RightmoveAlert(commands.Cog):
     @set.command(name="url")
     @commands.guild_only()
     async def set_url(self, ctx, *, url: str):
-        """Set the exact Rightmove search URL to scrape."""
-        await self.config.guild(ctx.guild).search_url.set(url)
-        await ctx.send(f"🔗 Search URL set to:\n`{url}`")
+        """
+        Set the exact Rightmove search URL to scrape.
+        Auto-encodes any raw " characters into %22 so Playwright can load it.
+        """
+        if "locationIdentifier=" in url:
+            pre, rest = url.split("locationIdentifier=", 1)
+            if "&" in rest:
+                ident, post = rest.split("&", 1)
+                ident_enc = quote(ident, safe="")
+                safe_url = f"{pre}locationIdentifier={ident_enc}&{post}"
+            else:
+                safe_url = f"{pre}locationIdentifier={quote(rest, safe='')}"
+        else:
+            safe_url = url.replace('"', '%22')
+        await self.config.guild(ctx.guild).search_url.set(safe_url)
+        await ctx.send(f"🔗 Search URL set to:\n`{safe_url}`")
 
     @set.command(name="maxprice")
     @commands.guild_only()
@@ -236,9 +252,9 @@ class RightmoveAlert(commands.Cog):
         val = amount.strip().lower()
         if val in ("none", "clear", "null"):
             await self.config.guild(ctx.guild).maxprice.clear()
-            return await ctx.send("✅ Cleared max-price filter. (Now unlimited.)")
+            return await ctx.send("✅ Cleared max-price filter (now unlimited).")
         if not val.isdigit():
-            return await ctx.send("❌ Please supply a number or the word `none`.")
+            return await ctx.send("❌ Supply a number (e.g. 175000) or the word `none`.")
         num = int(val)
         await self.config.guild(ctx.guild).maxprice.set(num)
         await ctx.send(f"✅ Max price set to £{num}.")
@@ -255,9 +271,9 @@ class RightmoveAlert(commands.Cog):
         val = count.strip().lower()
         if val in ("none", "clear", "null"):
             await self.config.guild(ctx.guild).minbeds.clear()
-            return await ctx.send("✅ Cleared min-beds filter. (Now no minimum.)")
+            return await ctx.send("✅ Cleared min-beds filter (now no minimum).")
         if not val.isdigit():
-            return await ctx.send("❌ Please supply a number or the word `none`.")
+            return await ctx.send("❌ Supply a number (e.g. 2) or the word `none`.")
         num = int(val)
         await self.config.guild(ctx.guild).minbeds.set(num)
         await ctx.send(f"✅ Min beds set to {num}.")
@@ -314,8 +330,8 @@ class RightmoveAlert(commands.Cog):
     @rmalert.command()
     async def test(self, ctx):
         """
-        One-off: scrape your URL, filter *all* matches, and alert them
-        so you can verify your filters/layout.
+        One-off: scrape your URL, filter *all* matches, and deliver them
+        so you can verify filters/layout.
         """
         cfg = await self.config.guild(ctx.guild).all()
         url = cfg.get("search_url")
