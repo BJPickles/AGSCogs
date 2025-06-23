@@ -3,7 +3,7 @@ import time
 import datetime
 import asyncio
 import math
-from datetime import time as dt_time
+from datetime import time as dt_time, timedelta
 from zoneinfo import ZoneInfo
 
 from lxml import html
@@ -51,10 +51,8 @@ BANNED_TYPE_SUBSTRINGS = [
     "not specified", "not-specified", "notspecified",
 ]
 
-
 class RightmoveData:
     """Scrapes Rightmove search results and returns a DataFrame."""
-
     def __init__(self, url: str, get_floorplans: bool = False):
         self._status_code, self._first_page = self._request(url)
         self._url = url
@@ -117,18 +115,15 @@ class RightmoveData:
         base  = "https://www.rightmove.co.uk"
 
         for c in cards:
-            # Price
             pr = c.xpath(
                 ".//a[@data-testid='property-price']//div"
                 "[contains(@class,'PropertyPrice_price__')]/text()"
             )
             price_raw = pr[0].strip() if pr else None
 
-            # Address
             ad = c.xpath(".//*[@data-testid='property-address']//address/text()")
             address = ad[0].strip() if ad else None
 
-            # Property type
             tp = c.xpath(
                 ".//span[contains(@class,'PropertyInformation_propertyType')]/text()"
             )
@@ -138,7 +133,6 @@ class RightmoveData:
                 )
             ptype = tp[0].strip() if tp else None
 
-            # Bedrooms
             bd = c.xpath(
                 ".//span[contains(@class,'PropertyInformation_bedroomsCount')]/text()"
             )
@@ -147,7 +141,6 @@ class RightmoveData:
             except ValueError:
                 beds = None
 
-            # Listed / Updated timestamps
             ld = c.xpath(
                 ".//span[contains(@class,'MarketedBy_joinedText')]/text()"
             ) or [None]
@@ -157,7 +150,6 @@ class RightmoveData:
             listed_ts  = self._parse_date(ld[0])
             updated_ts = self._parse_date(ud[0])
 
-            # STC?
             stc = bool(
                 c.xpath(
                     ".//span[contains(text(),'STC')"
@@ -165,7 +157,6 @@ class RightmoveData:
                 )
             )
 
-            # URL & ID
             href = c.xpath(".//a[@data-test='property-details']/@href")
             if not href:
                 href = c.xpath(".//a[@data-testid='property-details-lozenge']/@href")
@@ -177,7 +168,6 @@ class RightmoveData:
                 m2 = re.search(r"/properties/(\d+)", url)
                 pid = m2.group(1) if m2 else None
 
-            # First image
             img_elems = c.xpath(".//img[@data-testid='property-img-1']") or []
             if img_elems:
                 img_el = img_elems[0]
@@ -192,7 +182,6 @@ class RightmoveData:
             if img_url and img_url.startswith("//"):
                 img_url = "https:" + img_url
 
-            # Agent
             an = c.xpath(
                 ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]//img/@alt"
             )
@@ -235,7 +224,6 @@ class RightmoveData:
         return df
 
     def _get_results(self, get_floorplans: bool) -> pd.DataFrame:
-        # Always fetch page 1
         df = self._get_page(self._first_page, get_floorplans)
         page = 1
         while True:
@@ -257,39 +245,98 @@ class RightmoveCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=1234567890)
-        self.config.register_global(properties={})
+        # properties: pid → {channel_id, message_id, price, listed_ts, updated_ts, is_stc, active, vanished_ts}
+        # settings: cleanup_days, log_channel_id
+        self.config.register_global(
+            properties={},
+            settings={
+                "cleanup_days": 7,
+                "log_channel_id": None,
+            }
+        )
         self.scrape_loop     = None
         self.target_channel  = None
         self._rebuild_lock   = asyncio.Lock()
         self._last_test      = 0.0
+        self._halt           = False
 
     def cog_unload(self):
         if self.scrape_loop and self.scrape_loop.is_running():
             self.scrape_loop.cancel()
 
+    async def _log(self, message: str):
+        settings = await self.config.settings()
+        ch_id = settings.get("log_channel_id")
+        if ch_id:
+            ch = self.bot.get_channel(ch_id)
+            if ch and isinstance(ch, discord.TextChannel):
+                try:
+                    await ch.send(f"[RightmoveCog] {message}")
+                except:
+                    pass
+
     @commands.is_owner()
     @commands.group(name="rm", invoke_without_command=True)
     async def rm(self, ctx):
-        """Rightmove commands: .rm start .rm stop .rm test"""
+        """Rightmove commands: .rm start .rm stop .rm test .rm cleanup .rm setlog .rm setcleanup .rm abort"""
         await ctx.send_help(ctx.command)
+
+    @rm.command(name="setlog")
+    async def rm_setlog(self, ctx, channel: discord.TextChannel = None):
+        """Set or unset the log channel."""
+        cid = channel.id if channel else None
+        await self.config.settings.set_raw("log_channel_id", value=cid)
+        if channel:
+            await ctx.send(f"✅ Log channel set to {channel.mention}")
+        else:
+            await ctx.send("✅ Log channel unset")
+
+    @rm.command(name="setcleanup")
+    async def rm_setcleanup(self, ctx, days: int):
+        """Set number of days after vanished to delete channels."""
+        if days < 0:
+            return await ctx.send("❌ Days must be non-negative.")
+        await self.config.settings.set_raw("cleanup_days", value=days)
+        await ctx.send(f"✅ Cleanup interval set to {days} day(s).")
 
     @rm.command(name="start")
     async def rm_start(self, ctx, channel: discord.TextChannel = None):
         if self.scrape_loop and self.scrape_loop.is_running():
             return await ctx.send("❌ Already scheduled.")
         self.target_channel = channel or ctx.channel
+        self._halt = False
         self.scrape_loop = tasks.loop(time=SCRAPE_TIME)(self.do_scrape)
         self.scrape_loop.start()
         await ctx.send(
             f"✅ Scheduled daily scrape at 07:00 Europe/London in channel {self.target_channel.mention}."
         )
+        await self._log(f"Scheduled daily scrape in {self.target_channel.mention}")
 
     @rm.command(name="stop")
     async def rm_stop(self, ctx):
+        """Unschedule daily scrapes."""
         if not self.scrape_loop or not self.scrape_loop.is_running():
             return await ctx.send("❌ No scrape scheduled.")
         self.scrape_loop.cancel()
         await ctx.send("✅ Scrape unscheduled.")
+        await self._log("Scrape unscheduled")
+
+    @rm.command(name="abort")
+    async def rm_abort(self, ctx):
+        """Abort current and future scrapes."""
+        self._halt = True
+        if self.scrape_loop and self.scrape_loop.is_running():
+            self.scrape_loop.cancel()
+        await ctx.send("🛑 Scrape aborted and halted. Use `.rm start` to resume.")
+        await self._log("Scrape aborted and halted")
+
+    @rm.command(name="cleanup")
+    async def rm_cleanup(self, ctx):
+        """Manually run cleanup of vanished channels."""
+        await ctx.send("🔄 Running manual cleanup…")
+        count = await self._cleanup_old()
+        await ctx.send(f"✅ Cleanup done, removed {count} channel(s).")
+        await self._log(f"Manual cleanup removed {count} channel(s)")
 
     @rm.command(name="test")
     async def rm_test(self, ctx, *args):
@@ -320,11 +367,17 @@ class RightmoveCog(commands.Cog):
         self._last_test = now
 
         await ctx.send("🔄 Running manual scrape…")
+        await self._log(f"Manual scrape triggered by {ctx.author} in {self.target_channel.mention}")
         async with self._rebuild_lock:
             await self.do_scrape(force_refresh=override)
         await ctx.send("✅ Manual scrape done.")
+        await self._log("Manual scrape completed")
 
     async def do_scrape(self, force_refresh: bool = False):
+        if self._halt:
+            await self._log("Scrape aborted by halt flag")
+            return
+
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
             "sortType=1&viewType=LIST&channel=BUY"
@@ -339,39 +392,42 @@ class RightmoveCog(commands.Cog):
             "&dontShow=newHome%2Cretirement%2CsharedOwnership%2Cauction"
         )
         data = RightmoveData(url)
-        # HTTP check
         if data._status_code != 200:
-            return await self.target_channel.send(f"❌ HTTP {data._status_code}, aborting.")
-        df = data.get_results
+            msg = f"❌ HTTP {data._status_code}, aborting."
+            await self.target_channel.send(msg)
+            await self._log(msg)
+            return
 
-        # Bail out if nothing scraped
+        df = data.get_results
         if df.empty:
-            return await self.target_channel.send(
+            msg = (
                 f"⚠️ Scrape returned {data.results_count_display} results "
                 f"but DataFrame is empty. Check your XPaths or URL."
             )
+            await self.target_channel.send(msg)
+            await self._log(msg)
+            return
 
-        # Now safe to filter on 'type'
         df = df[df["type"].notna()]
         df = df[~df["type"].str.lower().apply(
             lambda t: any(sub in t for sub in BANNED_TYPE_SUBSTRINGS)
         )]
         df = df[~df["type"].str.lower().isin(BANNED_PROPERTY_TYPES)]
 
-        # Load cache and compute diffs
         cache     = await self.config.properties()
         new_props = {r["id"]: r for _, r in df.iterrows()}
         old_ids   = set(cache)
         new_ids   = set(new_props)
         guild     = self.target_channel.guild
 
-        # Prepare existing RIGHTMOVE categories
         existing_cats = [
             c for c in guild.categories if c.name.startswith(CATEGORY_PREFIX)
         ]
         existing_cats.sort(
             key=lambda c: int(c.name.split()[-1]) if c.name.split()[-1].isdigit() else 0
         )
+
+        now_ts = int(time.time())
 
         # New & updates
         for pid, r in new_props.items():
@@ -381,7 +437,6 @@ class RightmoveCog(commands.Cog):
             stc_changed   = r["is_stc"] and not old.get("is_stc", False)
 
             if is_new:
-                # Find or create a category with room (< MAX_PER_CATEGORY channels)
                 for cat in existing_cats:
                     if len(cat.channels) < MAX_PER_CATEGORY:
                         target_cat = cat
@@ -395,8 +450,10 @@ class RightmoveCog(commands.Cog):
                     next_idx = max(nums) + 1 if nums else 1
                     target_cat = await guild.create_category(f"{CATEGORY_PREFIX} {next_idx}")
                     existing_cats.append(target_cat)
+                    await self._log(f"Created category {target_cat.name}")
 
                 ch = await guild.create_text_channel(f"prop-{pid}", category=target_cat)
+                await self._log(f"Created channel {ch.name} in {target_cat.name}")
                 cache[pid] = {
                     "channel_id":   ch.id,
                     "message_id":   None,
@@ -405,6 +462,7 @@ class RightmoveCog(commands.Cog):
                     "updated_ts":   r["updated_ts"],
                     "is_stc":       r["is_stc"],
                     "active":       True,
+                    "vanished_ts":  None,
                 }
                 await self._send_or_edit(ch, pid, r, event="new", cache=cache)
                 continue
@@ -431,10 +489,10 @@ class RightmoveCog(commands.Cog):
             if old.get("active", True):
                 ch = guild.get_channel(old["channel_id"])
                 if ch:
-                    cache[pid]["active"] = False
+                    cache[pid]["active"]     = False
+                    cache[pid]["vanished_ts"]= now_ts
                     await self._send_or_edit(ch, pid, None, event="vanished", cache=cache)
 
-        # Persist cache modifications
         await self.config.properties.set(cache)
 
         # Force‐refresh
@@ -447,8 +505,12 @@ class RightmoveCog(commands.Cog):
                 if ch:
                     await self._send_or_edit(ch, pid, r, event="refresh", cache=cache)
 
+        # Cleanup old vanished channels
+        await self._cleanup_old()
+
         # Reorder
         await self._reorder_channels()
+        await self._log("Scrape run completed and channels reordered")
 
     async def _send_or_edit(
         self,
@@ -461,11 +523,11 @@ class RightmoveCog(commands.Cog):
         local_cache = cache if cache is not None else await self.config.properties()
         data  = local_cache[pid]
         emojis = {
-            "new":           ("🆕", "New", None),
-            "price_update":  ("🔄", "Price Updated", None),
-            "stc":           ("💖", "[STC]", discord.Color.magenta()),
-            "vanished":      ("❌", "Vanished", discord.Color.greyple()),
-            "refresh":       ("",    "",      None),
+            "new":           ("🆕",    "New",            None),
+            "price_update":  ("🔄",    "Price Updated",  None),
+            "stc":           ("💖",    "[STC]",          discord.Color.magenta()),
+            "vanished":      ("❌",    "Vanished",       discord.Color.greyple()),
+            "refresh":       ("",      "",               None),
         }
         emoji, pre, color = emojis[event]
 
@@ -474,12 +536,26 @@ class RightmoveCog(commands.Cog):
             if color is None:
                 if abs(price - TARGET_PRICE) <= IDEAL_DELTA:
                     color = discord.Color.blue()
+                    prefix_emoji = "🟢"
                 elif price <= 170_000:
                     color = discord.Color.green()
+                    prefix_emoji = "🟢"
                 elif price <= 220_000:
                     color = discord.Color.orange()
+                    prefix_emoji = "🟠"
                 else:
                     color = discord.Color.red()
+                    prefix_emoji = "🔴"
+            else:
+                prefix_emoji = "🔴" if event == "vanished" else "🟢"
+
+            # update channel name emoji
+            base_name = ch.name.split(" ",1)[0]
+            new_name = f"{base_name} {prefix_emoji}"
+            try:
+                await ch.edit(name=new_name)
+            except:
+                pass
 
             title = r["address"] if event == "refresh" else f"{emoji} {pre} — {r['address']}"
             desc = (
@@ -516,20 +592,51 @@ class RightmoveCog(commands.Cog):
                 color=color2,
                 description="This property has vanished from the search.",
             )
+            # mark red and channel
+            try:
+                await ch.edit(name=f"{ch.name.split()[0]} 🔴")
+            except:
+                pass
 
         msg_id = data.get("message_id")
         try:
             if msg_id:
                 msg = await ch.fetch_message(msg_id)
                 await msg.edit(embed=embed)
+                await self._log(f"Edited embed in {ch.mention} for {pid}")
             else:
                 msg = await ch.send(embed=embed)
                 data["message_id"] = msg.id
                 await self.config.properties.set(local_cache)
+                await self._log(f"Sent new embed in {ch.mention} for {pid}")
         except (discord.NotFound, discord.HTTPException):
             msg = await ch.send(embed=embed)
             data["message_id"] = msg.id
             await self.config.properties.set(local_cache)
+            await self._log(f"Sent embed (after error) in {ch.mention} for {pid}")
+
+    async def _cleanup_old(self) -> int:
+        """Delete channels for properties vanished > cleanup_days ago."""
+        cache = await self.config.properties()
+        settings = await self.config.settings()
+        days = settings.get("cleanup_days", 7)
+        threshold = time.time() - days * 86400
+        to_delete = []
+        for pid, data in list(cache.items()):
+            if not data.get("active", True) and data.get("vanished_ts") and data["vanished_ts"] < threshold:
+                ch = self.bot.get_channel(data["channel_id"])
+                if ch:
+                    try:
+                        await ch.delete()
+                        await self._log(f"Deleted channel {ch.name} for vanished {pid}")
+                    except:
+                        pass
+                to_delete.append(pid)
+        for pid in to_delete:
+            cache.pop(pid, None)
+        if to_delete:
+            await self.config.properties.set(cache)
+        return len(to_delete)
 
     async def _reorder_channels(self):
         guild = self.target_channel.guild
