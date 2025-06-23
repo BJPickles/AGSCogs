@@ -12,7 +12,7 @@ import requests
 
 import discord
 from discord.ext import tasks
-from discord.ext.commands import BadArgument, TextChannelConverter
+from discord.ext.commands import TextChannelConverter, BadArgument
 from redbot.core import Config, commands
 
 # ----------------------------
@@ -183,6 +183,7 @@ class RightmoveData:
                     img_url = img_tag.get("src") or None
             else:
                 img_url = None
+            # ensure full URL
             if img_url and img_url.startswith("//"):
                 img_url = "https:" + img_url
 
@@ -254,6 +255,7 @@ class RightmoveCog(commands.Cog):
         self.config.register_global(properties={})
         self.scrape_loop = None
         self.target_channel = None
+        # for rebuild / cooldown
         self._rebuild_lock = asyncio.Lock()
         self._last_test = 0.0
 
@@ -277,6 +279,7 @@ class RightmoveCog(commands.Cog):
             return await ctx.send("❌ Already scheduled.")
         self.target_channel = channel or ctx.channel
 
+        # set up daily loop
         self.scrape_loop = tasks.loop(time=SCRAPE_TIME)(self.do_scrape)
         self.scrape_loop.start()
 
@@ -300,6 +303,7 @@ class RightmoveCog(commands.Cog):
         Optionally pass a channel and/or 'override':
           .rm test #channel override
         """
+        # parse override + optional channel
         override = False
         channel = None
         for arg in args:
@@ -313,12 +317,14 @@ class RightmoveCog(commands.Cog):
 
         self.target_channel = channel or self.target_channel or ctx.channel
 
+        # block if a rebuild is in progress
         if self._rebuild_lock.locked() and not override:
             return await ctx.send(
                 "❌ A rebuild is already in progress. "
                 "Please wait or use `.rm test override` to force."
             )
 
+        # 5 minute cooldown
         now = time.time()
         if (now - self._last_test) < 300 and not override:
             rem = int(300 - (now - self._last_test))
@@ -338,7 +344,7 @@ class RightmoveCog(commands.Cog):
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
             "sortType=1&viewType=LIST&channel=BUY"
-            "&maxPrice=175000&radius=0.0"
+            "&maxPrice=250000&radius=0.0"
             "&locationIdentifier=USERDEFINEDAREA%5E%7B"
             "%22polylines%22%3A%22sh%7CtHhu%7BE%7D%7CDr_Nf%7B"
             "AnjZxvLz%7Df%40reAllgA%7Bab%40fg%60%40kyu%40s_"
@@ -351,21 +357,28 @@ class RightmoveCog(commands.Cog):
             "&maxDaysSinceAdded=14"
         )
         df = RightmoveData(url).get_results
+        # filter out banned types
         df = df[~df["type"].str.contains(BANNED_PATTERN, na=False)]
 
         cache = await self.config.properties()
         new_props = {r["id"]: r for _, r in df.iterrows()}
         old_ids   = set(cache)
         new_ids   = set(new_props)
-        guild     = self.target_channel.guild
 
-        # find/create category
-        existing = [c for c in guild.categories if c.name.startswith(CATEGORY_PREFIX)]
+        guild    = self.target_channel.guild
+
+        # find/create category under CATEGORY_PREFIX with <MAX_PER_CATEGORY> prop- channels
+        existing = [
+            c for c in guild.categories
+            if c.name.startswith(CATEGORY_PREFIX)
+        ]
         existing.sort(key=lambda c: int(c.name.split()[-1]) if c.name.split()[-1].isdigit() else 1)
         target_cat = None
         for cat in existing:
-            cnt = sum(1 for ch in cat.channels
-                      if isinstance(ch, discord.TextChannel) and ch.name.startswith("prop-"))
+            cnt = sum(
+                1 for ch in cat.channels
+                if isinstance(ch, discord.TextChannel) and ch.name.startswith("prop-")
+            )
             if cnt < MAX_PER_CATEGORY:
                 target_cat = cat
                 break
@@ -373,7 +386,7 @@ class RightmoveCog(commands.Cog):
             idx = int(existing[-1].name.split()[-1]) + 1 if existing else 1
             target_cat = await guild.create_category(f"{CATEGORY_PREFIX} {idx}")
 
-        # new & updates
+        # handle new & updates
         for pid, r in new_props.items():
             is_new        = pid not in cache
             old           = cache.get(pid, {})
@@ -409,7 +422,7 @@ class RightmoveCog(commands.Cog):
                 await self.post_embed(ch, r, event="price_update")
                 continue
 
-        # vanished
+        # handle vanished
         for pid in old_ids - new_ids:
             old = cache[pid]
             if old.get("active", True):
@@ -419,6 +432,7 @@ class RightmoveCog(commands.Cog):
                     await self.post_embed(ch, None, event="vanished")
 
         await self.config.properties.set(cache)
+        # finally, reorder every category
         await self._reorder_channels()
 
     async def _reorder_channels(self):
@@ -427,6 +441,7 @@ class RightmoveCog(commands.Cog):
         for cat in guild.categories:
             if not cat.name.startswith(CATEGORY_PREFIX):
                 continue
+            # gather (price, channel_id)
             ordering = []
             for ch in cat.channels:
                 if not isinstance(ch, discord.TextChannel):
@@ -474,25 +489,14 @@ class RightmoveCog(commands.Cog):
                 f"Listed: <t:{r['listed_ts']}:F> (<t:{r['listed_ts']}:R>)\n"
                 f"Updated: <t:{r['updated_ts']}:F> (<t:{r['updated_ts']}:R>)"
             )
-
             embed = discord.Embed(title=title, color=color, description=desc)
-
-            # use full‐size image
-            if r.get("image_url"):
-                embed.set_image(url=r["image_url"])
-
-            # cast bedrooms to int
-            beds = r.get("number_bedrooms")
-            beds_str = str(int(beds)) if beds is not None else "N/A"
-            embed.add_field(name="🛏 Bedrooms", value=beds_str, inline=True)
-
+            embed.set_thumbnail(url=r["image_url"])
             embed.add_field(name="💷 Price", value=f"£{int(price):,}", inline=True)
+            embed.add_field(name="🛏 Bedrooms", value=str(r["number_bedrooms"]), inline=True)
             embed.add_field(name="🏠 Type", value=r["type"], inline=True)
-            if r.get("agent") and r.get("agent_url"):
+            if r["agent"] and r["agent_url"]:
                 embed.add_field(
-                    name="🔗 Agent",
-                    value=f"[{r['agent']}]({r['agent_url']})",
-                    inline=True,
+                    name="🔗 Agent", value=f"[{r['agent']}]({r['agent_url']})", inline=True
                 )
             await ch.send(embed=embed)
         else:
