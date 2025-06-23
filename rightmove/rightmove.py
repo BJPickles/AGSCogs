@@ -80,11 +80,14 @@ class RightmoveData:
             xp_price = "//span[@class='propertyCard-priceValue']/text()"
         else:
             xp_price = "//div[@class='propertyCard-priceValue']/text()"
+
         xp_title   = "//div[@class='propertyCard-details']//h2[@class='propertyCard-title']/text()"
         xp_address = "//address[@class='propertyCard-address']//span/text()"
         xp_link    = "//div[@class='propertyCard-details']//a[@class='propertyCard-link']/@href"
-        xp_agent   = ("//div[@class='propertyCard-contactsItem']"
-                      "//a[@class='propertyCard-branchLogo-link']/@href")
+        xp_agent   = (
+            "//div[@class='propertyCard-contactsItem']"
+            "//a[@class='propertyCard-branchLogo-link']/@href"
+        )
 
         prices    = tree.xpath(xp_price)
         titles    = tree.xpath(xp_title)
@@ -145,9 +148,10 @@ class RightmoveData:
 
 class RightmoveCog(commands.Cog):
     """Scrapes Rightmove daily and posts new listings in an embed."""
+
     def __init__(self, bot):
         self.bot = bot
-        self.target_channel = None
+        self.target_channel: discord.TextChannel = None
 
     def cog_unload(self):
         if self.scrape_loop.is_running():
@@ -156,10 +160,13 @@ class RightmoveCog(commands.Cog):
     @commands.is_owner()
     @commands.command(name="start-scrape")
     async def start_scrape(self, ctx, channel: discord.TextChannel = None):
-        """Start daily scrape (owner only)."""
+        """Start daily Rightmove scrape (owner only)."""
         if self.scrape_loop.is_running():
             return await ctx.send("❌ Already running.")
         self.target_channel = channel or ctx.channel
+        # run immediately once:
+        await self.do_scrape()
+        # then schedule every 24h:
         self.scrape_loop.start()
         await ctx.send(f"✅ Scraping started. Posting to {self.target_channel.mention}")
 
@@ -172,8 +179,8 @@ class RightmoveCog(commands.Cog):
         self.scrape_loop.cancel()
         await ctx.send("✅ Scraping stopped.")
 
-    @tasks.loop(hours=24, wait=False)
-    async def scrape_loop(self):
+    async def do_scrape(self):
+        # your 14-day URL:
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
             "sortType=1&viewType=LIST&channel=BUY"
@@ -188,7 +195,6 @@ class RightmoveCog(commands.Cog):
             "&dontShow=newHome%2Cretirement%2CsharedOwnership%2Cauction"
             "&maxDaysSinceAdded=14"
         )
-
         ts = int(time.time())
         rm = RightmoveData(url)
         df = rm.get_results
@@ -196,7 +202,7 @@ class RightmoveCog(commands.Cog):
         em = discord.Embed(
             title="📈 New Rightmove Listings (past 14 days)",
             description=f"Scraped at <t:{ts}:F> (<t:{ts}:R>)",
-            color=discord.Color.blue()
+            color=discord.Color.blue(),
         )
         if df.empty:
             em.add_field(name="No new listings", value="None found in the past 14 days.")
@@ -210,6 +216,14 @@ class RightmoveCog(commands.Cog):
                         f"🏠 [View listing]({r['url']})\n"
                         f"🔗 [Agent page]({r['agent_url']})"
                     ),
-                    inline=False
+                    inline=False,
                 )
         await self.target_channel.send(embed=em)
+
+    @tasks.loop(hours=24)
+    async def scrape_loop(self):
+        await self.do_scrape()
+
+
+def setup(bot):
+    bot.add_cog(RightmoveCog(bot))
