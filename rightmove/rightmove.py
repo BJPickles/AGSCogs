@@ -61,19 +61,30 @@ class RightmoveData:
 
     @property
     def results_count_display(self):
+        """Total listings as shown on the first page, or 0 if not found."""
         tree = html.fromstring(self._first_page)
         xp = "//span[@class='searchHeader-resultCount']/text()"
-        return int(tree.xpath(xp)[0].replace(",", ""))
+        items = tree.xpath(xp)
+        if not items:
+            return 0
+        try:
+            return int(items[0].replace(",", ""))
+        except ValueError:
+            return 0
 
     @property
     def page_count(self):
-        cnt = self.results_count_display // 24
-        if self.results_count_display % 24:
-            cnt += 1
-        return min(cnt, 42)
+        """Number of pages (24 results per page, max 42)."""
+        total = self.results_count_display
+        # if no total or fewer than 25, just 1 page
+        if total < 1 or total <= 24:
+            return 1
+        pages = total // 24 + (1 if total % 24 else 0)
+        return min(pages, 42)
 
     def _get_page(self, content: bytes, get_floorplans: bool = False):
         tree = html.fromstring(content)
+        # price XPaths differ for rent vs sale
         if "rent" in self.rent_or_sale:
             xp_price = "//span[@class='propertyCard-priceValue']/text()"
         else:
@@ -117,31 +128,34 @@ class RightmoveData:
         return df[df["address"].notnull()]
 
     def _get_results(self, get_floorplans: bool = False):
-        df = self._get_page(self._first_page, get_floorplans)
-        for p in range(1, self.page_count + 1):
-            page_url = f"{self.url}&index={p*24}"
-            sc, ct = self._request(page_url)
+        results = self._get_page(self._first_page, get_floorplans)
+        # only iterate pages 2..page_count
+        for p in range(1, self.page_count):
+            p_url = f"{self.url}&index={p*24}"
+            sc, content = self._request(p_url)
             if sc != 200:
                 break
-            tmp = self._get_page(ct, get_floorplans)
-            df = pd.concat([df, tmp], ignore_index=True)
-        return self._clean(df)
+            temp = self._get_page(content, get_floorplans)
+            results = pd.concat([results, temp], ignore_index=True)
+        return self._clean_results(results)
 
     @staticmethod
-    def _clean(df: pd.DataFrame):
-        df["price"] = df["price"].replace(r"\D+", "", regex=True).astype(float)
-        df["postcode"] = df["address"].str.extract(
+    def _clean_results(results: pd.DataFrame):
+        results["price"] = (
+            results["price"].replace(r"\D+", "", regex=True).astype(float)
+        )
+        results["postcode"] = results["address"].str.extract(
             r"\b([A-Za-z][A-Za-z]?[0-9][0-9]?[A-Za-z]?)\b"
         )[0]
-        df["full_postcode"] = df["address"].str.extract(
+        results["full_postcode"] = results["address"].str.extract(
             r"([A-Za-z][A-Za-z]?[0-9][0-9]?[A-Za-z]?[0-9]?\s[0-9]?[A-Za-z][A-Za-z])"
         )[0]
-        beds = df["type"].str.extract(r"\b(\d{1,2})\b")[0].fillna("")
+        beds = results["type"].str.extract(r"\b(\d{1,2})\b")[0].fillna("")
         beds[beds.str.lower().str.contains("studio")] = "0"
-        df["number_bedrooms"] = pd.to_numeric(beds, errors="coerce").fillna(0).astype(int)
-        df["type"] = df["type"].str.strip()
-        df["search_date"] = datetime.datetime.now()
-        return df
+        results["number_bedrooms"] = pd.to_numeric(beds, errors="coerce").fillna(0).astype(int)
+        results["type"] = results["type"].str.strip()
+        results["search_date"] = datetime.datetime.now()
+        return results
 
 
 class RightmoveCog(commands.Cog):
@@ -161,8 +175,8 @@ class RightmoveCog(commands.Cog):
         if self.scrape_loop.is_running():
             return await ctx.send("❌ Already running.")
         self.target_channel = channel or ctx.channel
-        await self.do_scrape()         # immediate first run
-        self.scrape_loop.start()       # schedule every 24h
+        await self.do_scrape()      # immediate first run
+        self.scrape_loop.start()    # then every 24h
         await ctx.send(f"✅ Scraping started. Posting to {self.target_channel.mention}")
 
     @commands.is_owner()
@@ -198,7 +212,7 @@ class RightmoveCog(commands.Cog):
             color=discord.Color.blue(),
         )
         if df.empty:
-            em.add_field(name="No new listings", value="None found.")
+            em.add_field(name="No new listings", value="None found in the past 14 days.")
         else:
             for _, r in df.iterrows():
                 em.add_field(
