@@ -140,20 +140,23 @@ class RightmoveAlert(commands.Cog):
     async def daily_summary(self):
         """Post a daily summary of scraping statistics at 23:59 each day."""
         try:
+            now_ts = int(datetime.datetime.now(self.tz).timestamp())
             g = await getattr(self.config, "global")()
             listings_checked = g.get('listings_checked', 0)
             matched = g.get('matched', 0)
             blocked = g.get('blocked', 0)
             user_alerts = g.get('user_alerts', {})
             unique_users = len([u for u, v in user_alerts.items() if v > 0])
-            embed = discord.Embed(
-                title="Daily Summary",
-                timestamp=datetime.datetime.now(self.tz)
-            )
+            embed = discord.Embed(title="Daily Summary")
             embed.add_field(name="Listings Checked", value=str(listings_checked), inline=True)
             embed.add_field(name="Listings Matched", value=str(matched), inline=True)
             embed.add_field(name="Blocked by Blacklist", value=str(blocked), inline=True)
             embed.add_field(name="Unique Users Alerted", value=str(unique_users), inline=True)
+            embed.add_field(
+                name="Generated",
+                value=f"<t:{now_ts}:F> (<t:{now_ts}:R>)",
+                inline=False
+            )
 
             for guild in self.bot.guilds:
                 cfg = await self.config.guild(guild).all()
@@ -176,8 +179,8 @@ class RightmoveAlert(commands.Cog):
 
     async def log_event(self, message: str):
         """Log debug or error messages to configured log channels."""
-        ts = datetime.datetime.now(self.tz).strftime("%Y-%m-%d %H:%M:%S")
-        full_msg = f"[{ts}] {message}"
+        now_ts = int(datetime.datetime.now(self.tz).timestamp())
+        full_msg = f"{message} — <t:{now_ts}:F> (<t:{now_ts}:R>)"
         for guild in self.bot.guilds:
             cfg = await self.config.guild(guild).all()
             ch_id = cfg.get("log_channel")
@@ -191,14 +194,19 @@ class RightmoveAlert(commands.Cog):
 
     async def handle_listing(self, uid: int, listing: dict):
         """Send alerts for a single listing to user DMs and alert channels."""
+        now_ts = int(datetime.datetime.now(self.tz).timestamp())
         embed = discord.Embed(
             title=listing.get("title", "Listing"),
-            url=listing.get("url"),
-            timestamp=datetime.datetime.now(self.tz)
+            url=listing.get("url")
         )
         embed.add_field(name="Price", value=f"£{listing.get('price')}", inline=True)
         embed.add_field(name="Beds", value=str(listing.get('beds')), inline=True)
         embed.add_field(name="Location", value=listing.get('location', "Unknown"), inline=False)
+        embed.add_field(
+            name="Scraped At",
+            value=f"<t:{now_ts}:F> (<t:{now_ts}:R>)",
+            inline=False
+        )
         file_bytes = listing.get('screenshot')
         filename = f"{listing.get('id')}.png" if file_bytes else None
         if file_bytes:
@@ -236,7 +244,7 @@ class RightmoveAlert(commands.Cog):
                     log_ch = self.bot.get_channel(log_ch_id)
                     if log_ch:
                         try:
-                            await log_ch.send(f"Alert for user {uid}: Listing {listing.get('id')}")
+                            await log_ch.send(f"Alert for user {uid}: Listing {listing.get('id')} — <t:{now_ts}:R>")
                         except:
                             pass
 
@@ -475,5 +483,11 @@ class RightmoveAlert(commands.Cog):
             name="Summary Channel",
             value=(f"<#{sc}>" if sc else "Not set"),
             inline=True
+        )
+        now_ts = int(datetime.datetime.now(self.tz).timestamp())
+        embed.add_field(
+            name="Status Generated",
+            value=f"<t:{now_ts}:F> (<t:{now_ts}:R>)",
+            inline=False
         )
         await ctx.send(embed=embed)
