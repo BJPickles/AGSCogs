@@ -1,3 +1,5 @@
+# cogs/rightmove/rightmove.py
+
 import datetime
 import time
 
@@ -12,8 +14,7 @@ from redbot.core import commands
 
 
 class RightmoveData:
-    """The `RightmoveData` webscraper collects structured data on properties
-    returned by a search performed on www.rightmove.co.uk."""
+    """Scrape structured property data from a Rightmove search URL."""
     def __init__(self, url: str, get_floorplans: bool = False):
         self._status_code, self._first_page = self._request(url)
         self._url = url
@@ -33,12 +34,12 @@ class RightmoveData:
         self._results = self._get_results(get_floorplans=get_floorplans)
 
     def _validate_url(self):
-        real_url = "{}://www.rightmove.co.uk/{}/find.html?"
+        real = "{}://www.rightmove.co.uk/{}/find.html?"
         protocols = ["http", "https"]
         types = ["property-to-rent", "property-for-sale", "new-homes-for-sale"]
-        valid_prefixes = [real_url.format(p, t) for p in protocols for t in types]
-        if not self.url.startswith(tuple(valid_prefixes)) or self._status_code != 200:
-            raise ValueError(f"Invalid rightmove search URL:\n\n\t{self.url}")
+        prefixes = [real.format(p, t) for p in protocols for t in types]
+        if not self.url.startswith(tuple(prefixes)) or self._status_code != 200:
+            raise ValueError(f"Invalid Rightmove URL:\n{self.url}")
 
     @property
     def url(self):
@@ -52,110 +53,101 @@ class RightmoveData:
     def rent_or_sale(self):
         if "/property-for-sale/" in self.url or "/new-homes-for-sale/" in self.url:
             return "sale"
-        elif "/property-to-rent/" in self.url:
+        if "/property-to-rent/" in self.url:
             return "rent"
-        elif "/commercial-property-for-sale/" in self.url:
+        if "/commercial-property-for-sale/" in self.url:
             return "sale-commercial"
-        elif "/commercial-property-to-let/" in self.url:
+        if "/commercial-property-to-let/" in self.url:
             return "rent-commercial"
-        else:
-            raise ValueError(f"Invalid rightmove URL:\n\n\t{self.url}")
+        raise ValueError(f"Invalid Rightmove URL:\n{self.url}")
 
     @property
     def results_count_display(self):
         tree = html.fromstring(self._first_page)
-        xpath = "//span[@class='searchHeader-resultCount']/text()"
-        return int(tree.xpath(xpath)[0].replace(",", ""))
+        xp = "//span[@class='searchHeader-resultCount']/text()"
+        return int(tree.xpath(xp)[0].replace(",", ""))
 
     @property
     def page_count(self):
-        pages = self.results_count_display // 24
+        cnt = self.results_count_display // 24
         if self.results_count_display % 24:
-            pages += 1
-        return min(pages, 42)
+            cnt += 1
+        return min(cnt, 42)
 
-    def _get_page(self, request_content: str, get_floorplans: bool = False):
-        tree = html.fromstring(request_content)
+    def _get_page(self, content: bytes, get_floorplans: bool = False):
+        tree = html.fromstring(content)
         if "rent" in self.rent_or_sale:
-            xp_prices = "//span[@class='propertyCard-priceValue']/text()"
+            xp_price = "//span[@class='propertyCard-priceValue']/text()"
         else:
-            xp_prices = "//div[@class='propertyCard-priceValue']/text()"
-        xp_titles = (
-            "//div[@class='propertyCard-details']"
-            "//a[@class='propertyCard-link']"
-            "//h2[@class='propertyCard-title']/text()"
-        )
-        xp_addresses = "//address[@class='propertyCard-address']//span/text()"
-        xp_weblinks = "//div[@class='propertyCard-details']//a[@class='propertyCard-link']/@href"
-        xp_agent_urls = (
-            "//div[@class='propertyCard-contactsItem']"
-            "//div[@class='propertyCard-branchLogo']"
-            "//a[@class='propertyCard-branchLogo-link']/@href"
-        )
+            xp_price = "//div[@class='propertyCard-priceValue']/text()"
+        xp_title   = "//div[@class='propertyCard-details']//h2[@class='propertyCard-title']/text()"
+        xp_address = "//address[@class='propertyCard-address']//span/text()"
+        xp_link    = "//div[@class='propertyCard-details']//a[@class='propertyCard-link']/@href"
+        xp_agent   = ("//div[@class='propertyCard-contactsItem']"
+                      "//a[@class='propertyCard-branchLogo-link']/@href")
 
-        prices = tree.xpath(xp_prices)
-        titles = tree.xpath(xp_titles)
-        addresses = tree.xpath(xp_addresses)
-        base = "https://www.rightmove.co.uk"
-        weblinks = [f"{base}{u}" for u in tree.xpath(xp_weblinks)]
-        agent_urls = [f"{base}{u}" for u in tree.xpath(xp_agent_urls)]
+        prices    = tree.xpath(xp_price)
+        titles    = tree.xpath(xp_title)
+        addresses = tree.xpath(xp_address)
+        base      = "https://www.rightmove.co.uk"
+        links     = [f"{base}{u}" for u in tree.xpath(xp_link)]
+        agents    = [f"{base}{u}" for u in tree.xpath(xp_agent)]
 
-        floorplan_urls = [] if get_floorplans else np.nan
+        floorplans = [] if get_floorplans else np.nan
         if get_floorplans:
-            for link in weblinks:
-                sc, cont = self._request(link)
+            for u in links:
+                sc, ct = self._request(u)
                 if sc != 200:
-                    floorplan_urls.append(np.nan)
+                    floorplans.append(np.nan)
                     continue
-                t2 = html.fromstring(cont)
-                xp_fp = "//*[@id='floorplanTabs']/div[2]/div[2]/img/@src"
-                fps = t2.xpath(xp_fp)
-                floorplan_urls.append(fps[0] if fps else np.nan)
+                t2 = html.fromstring(ct)
+                fp = t2.xpath("//*[@id='floorplanTabs']/div[2]/div[2]/img/@src")
+                floorplans.append(fp[0] if fp else np.nan)
 
-        data = [prices, titles, addresses, weblinks, agent_urls]
+        data = [prices, titles, addresses, links, agents]
         if get_floorplans:
-            data.append(floorplan_urls)
-        df = pd.DataFrame(list(zip(*data)), columns=[
-            "price", "type", "address", "url", "agent_url"
-        ] + (["floorplan_url"] if get_floorplans else []))
-        df = df[df["address"].notnull()]
-        return df
+            data.append(floorplans)
+
+        cols = ["price", "type", "address", "url", "agent_url"]
+        if get_floorplans:
+            cols.append("floorplan_url")
+
+        df = pd.DataFrame(list(zip(*data)), columns=cols)
+        return df[df["address"].notnull()]
 
     def _get_results(self, get_floorplans: bool = False):
-        results = self._get_page(self._first_page, get_floorplans=get_floorplans)
+        df = self._get_page(self._first_page, get_floorplans)
         for p in range(1, self.page_count + 1):
-            p_url = f"{self.url}&index={p * 24}"
-            sc, content = self._request(p_url)
+            page_url = f"{self.url}&index={p*24}"
+            sc, ct = self._request(page_url)
             if sc != 200:
                 break
-            temp = self._get_page(content, get_floorplans=get_floorplans)
-            results = pd.concat([results, temp], ignore_index=True)
-        return self._clean_results(results)
+            tmp = self._get_page(ct, get_floorplans)
+            df = pd.concat([df, tmp], ignore_index=True)
+        return self._clean(df)
 
     @staticmethod
-    def _clean_results(results: pd.DataFrame):
-        results["price"] = (
-            results["price"].replace(r"\D+", "", regex=True).astype(float)
-        )
-        results["postcode"] = results["address"].str.extract(
+    def _clean(df: pd.DataFrame):
+        df["price"] = df["price"].replace(r"\D+", "", regex=True).astype(float)
+        df["postcode"] = df["address"].str.extract(
             r"\b([A-Za-z][A-Za-z]?[0-9][0-9]?[A-Za-z]?)\b"
         )[0]
-        results["full_postcode"] = results["address"].str.extract(
+        df["full_postcode"] = df["address"].str.extract(
             r"([A-Za-z][A-Za-z]?[0-9][0-9]?[A-Za-z]?[0-9]?\s[0-9]?[A-Za-z][A-Za-z])"
         )[0]
-        beds = results["type"].str.extract(r"\b(\d{1,2})\b")[0].fillna("")
+        beds = df["type"].str.extract(r"\b(\d{1,2})\b")[0].fillna("")
         beds[beds.str.lower().str.contains("studio")] = "0"
-        results["number_bedrooms"] = pd.to_numeric(beds, errors="coerce").fillna(0).astype(int)
-        results["type"] = results["type"].str.strip()
-        results["search_date"] = datetime.datetime.now()
-        return results
+        df["number_bedrooms"] = pd.to_numeric(beds, errors="coerce").fillna(0).astype(int)
+        df["type"] = df["type"].str.strip()
+        df["search_date"] = datetime.datetime.now()
+        return df
 
 
 class RightmoveCog(commands.Cog):
-    """Redbot cog to scrape Rightmove once daily for new listings."""
+    """Scrapes Rightmove daily and posts new listings in an embed."""
     def __init__(self, bot):
         self.bot = bot
-        self.target_channel: discord.TextChannel = None
+        self.target_channel = None
 
     def cog_unload(self):
         if self.scrape_loop.is_running():
@@ -163,29 +155,25 @@ class RightmoveCog(commands.Cog):
 
     @commands.is_owner()
     @commands.command(name="start-scrape")
-    async def _start(self, ctx, channel: discord.TextChannel = None):
-        """
-        Start the daily Rightmove scrape.
-        Optionally specify a channel; otherwise uses this one.
-        """
+    async def start_scrape(self, ctx, channel: discord.TextChannel = None):
+        """Start daily scrape (owner only)."""
         if self.scrape_loop.is_running():
-            return await ctx.send("❌ Scrape is already running.")
+            return await ctx.send("❌ Already running.")
         self.target_channel = channel or ctx.channel
         self.scrape_loop.start()
-        await ctx.send(f"✅ Started daily scraping. Posting to {self.target_channel.mention}")
+        await ctx.send(f"✅ Scraping started. Posting to {self.target_channel.mention}")
 
     @commands.is_owner()
     @commands.command(name="stop-scrape")
-    async def _stop(self, ctx):
-        """Stop the daily Rightmove scrape."""
+    async def stop_scrape(self, ctx):
+        """Stop the daily scrape."""
         if not self.scrape_loop.is_running():
-            return await ctx.send("❌ Scrape is not running.")
+            return await ctx.send("❌ Not running.")
         self.scrape_loop.cancel()
-        await ctx.send("✅ Stopped scraping.")
+        await ctx.send("✅ Scraping stopped.")
 
     @tasks.loop(hours=24, wait=False)
     async def scrape_loop(self):
-        # Your improved URL with maxDaysSinceAdded=14
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
             "sortType=1&viewType=LIST&channel=BUY"
@@ -201,36 +189,27 @@ class RightmoveCog(commands.Cog):
             "&maxDaysSinceAdded=14"
         )
 
-        scraped_at = int(time.time())
+        ts = int(time.time())
         rm = RightmoveData(url)
         df = rm.get_results
 
         em = discord.Embed(
             title="📈 New Rightmove Listings (past 14 days)",
-            description=f"Scraped at <t:{scraped_at}:F> (<t:{scraped_at}:R>)",
+            description=f"Scraped at <t:{ts}:F> (<t:{ts}:R>)",
             color=discord.Color.blue()
         )
-
         if df.empty:
-            em.add_field(
-                name="No new listings",
-                value="No properties found in the past 14 days."
-            )
+            em.add_field(name="No new listings", value="None found in the past 14 days.")
         else:
-            for _, row in df.iterrows():
+            for _, r in df.iterrows():
                 em.add_field(
-                    name=row["address"],
+                    name=r["address"],
                     value=(
-                        f"💷 **£{int(row['price']):,}**\n"
-                        f"🛏 **{row['number_bedrooms']}** beds\n"
-                        f"🏠 [View listing]({row['url']})\n"
-                        f"🔗 [Agent page]({row['agent_url']})"
+                        f"💷 **£{int(r['price']):,}**\n"
+                        f"🛏 **{r['number_bedrooms']}** beds\n"
+                        f"🏠 [View listing]({r['url']})\n"
+                        f"🔗 [Agent page]({r['agent_url']})"
                     ),
                     inline=False
                 )
-
         await self.target_channel.send(embed=em)
-
-
-def setup(bot):
-    bot.add_cog(RightmoveCog(bot))
