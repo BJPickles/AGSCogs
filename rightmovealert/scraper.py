@@ -2,7 +2,7 @@ import asyncio
 import random
 import datetime
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import urlencode
 from playwright.async_api import async_playwright, Playwright, BrowserContext
 
 class CaptchaError(Exception):
@@ -13,7 +13,7 @@ class RightmoveScraper:
         self.playwright: Playwright = None
         self.context: BrowserContext = None
         self.backoff_count = 0
-        # Default region code for Hampshire if none supplied
+        # raw default region code for Hampshire
         self._default_region = "REGION^61303"
 
     async def _init(self):
@@ -45,6 +45,7 @@ class RightmoveScraper:
                 locale="en-GB",
                 timezone_id="Europe/London"
             )
+            # stealth
             await self.context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {get: () => false});
                 window.navigator.chrome = { runtime: {} };
@@ -53,75 +54,75 @@ class RightmoveScraper:
                 Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
                 Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 4 });
                 Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) =>
-                    parameters.name === 'notifications'
-                        ? Promise.resolve({ state: Notification.permission })
-                        : originalQuery(parameters);
+                const originalPerm = navigator.permissions.query;
+                navigator.permissions.query = params => params.name === 'notifications'
+                  ? Promise.resolve({ state: Notification.permission })
+                  : originalPerm(params);
             """)
 
     async def scrape_area(self, area: str, max_price: int = None, min_beds: int = None, region_code: str = None) -> list:
         """
-        Scrape Rightmove by constructing the direct search URL:
-        https://www.rightmove.co.uk/property-for-sale/find.html?
-          searchLocation=Hampshire
-          &useLocationIdentifier=true
-          &locationIdentifier=REGION^61303
-          &radius=0.5
-          &minBedrooms=2
-          &propertyTypes=detached,semi-detached,terraced
-          &_includeSSTC=on
-          &includeSSTC=true
+        Scrape Rightmove by constructing the URL:
+          https://www.rightmove.co.uk/property-for-sale/find.html?
+            searchLocation=Hampshire
+            &useLocationIdentifier=true
+            &locationIdentifier=REGION%5E61303
+            &radius=0.5
+            [&maxPrice=...]
+            [&minBedrooms=...]
+            &propertyTypes=detached,semi-detached,terraced
+            &_includeSSTC=on&includeSSTC=true
+            &sortType=2&viewType=LIST&channel=BUY&index=0
         """
         await self._init()
         page = await self.context.new_page()
         try:
-            # Optional human-like detour
+            # occasional human-like detour
             if random.random() < 0.3:
-                for extra in ["/news","/why-buy","/help","/offers-for-sellers","/guides","/overseas"]:
+                for extra in ("/news","/why-buy","/help","/offers-for-sellers","/guides","/overseas"):
                     await page.goto(f"https://www.rightmove.co.uk{extra}")
                     await page.wait_for_load_state("networkidle")
-                    await asyncio.sleep(random.uniform(1,2))
+                    await asyncio.sleep(random.uniform(1, 2))
                 await page.goto("https://www.rightmove.co.uk")
                 await page.wait_for_load_state("networkidle")
-                await asyncio.sleep(random.uniform(1,2))
+                await asyncio.sleep(random.uniform(1, 2))
 
-            # Determine region identifier
+            # select region identifier
             identifier = region_code or self._default_region
-            # URL‐encode region (keep caret safe)
-            encoded_region = quote(identifier, safe="^")
 
-            # Build query parameters
-            price_q = str(max_price) if max_price is not None else ""
-            minb_q = str(min_beds) if min_beds is not None else ""
-            prop_types = quote("detached,semi-detached,terraced", safe=",")
-            radius = "0.5"
+            # build query params, omitting empty ones
+            params = {
+                "searchLocation": area,
+                "useLocationIdentifier": "true",
+                "locationIdentifier": identifier,
+                "radius": 0.5,
+                "propertyTypes": "detached,semi-detached,terraced",
+                "_includeSSTC": "on",
+                "includeSSTC": "true",
+                "sortType": 2,
+                "viewType": "LIST",
+                "channel": "BUY",
+                "index": 0,
+            }
+            if max_price is not None:
+                params["maxPrice"] = max_price
+            if min_beds is not None:
+                params["minBedrooms"] = min_beds
 
-            search_url = (
-                "https://www.rightmove.co.uk/property-for-sale/find.html?"
-                f"searchLocation={quote(area)}"
-                f"&useLocationIdentifier=true"
-                f"&locationIdentifier={encoded_region}"
-                f"&radius={radius}"
-                f"&minBedrooms={minb_q}"
-                f"&propertyTypes={prop_types}"
-                f"&_includeSSTC=on"
-                f"&includeSSTC=true"
-                f"&sortType=2&viewType=LIST&channel=BUY&index=0"
-            )
+            search_url = "https://www.rightmove.co.uk/property-for-sale/find.html?" + urlencode(params)
 
-            # Navigate to filtered results
+            # navigate
             await page.goto(search_url)
             await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(random.uniform(2,4))
+            await asyncio.sleep(random.uniform(2, 4))
 
-            # Human-like scrolling
-            for _ in range(random.randint(2,5)):
+            # human-like scrolling
+            for _ in range(random.randint(2, 5)):
                 h = await page.evaluate("document.body.scrollHeight")
                 await page.evaluate(f"window.scrollTo(0, {random.randint(0, h)})")
-                await asyncio.sleep(random.uniform(0.5,1.5))
+                await asyncio.sleep(random.uniform(0.5, 1.5))
 
-            # Scrape property cards
+            # scrape .propertyCard elements
             cards = await page.query_selector_all(".propertyCard")
             results = []
             for card in cards:
@@ -138,12 +139,9 @@ class RightmoveScraper:
                     price = int("".join(filter(str.isdigit, price_text))) if price_text else 0
                     beds = 0
                     for li in await card.query_selector_all(".propertyCard-details li"):
-                        t = await li.text_content() or ""
-                        if "bed" in t.lower():
-                            try:
-                                beds = int(t.strip().split()[0])
-                            except:
-                                beds = 0
+                        txt = await li.text_content() or ""
+                        if "bed" in txt.lower():
+                            beds = int(txt.split()[0]) if txt.split()[0].isdigit() else 0
                             break
                     loc_el = await card.query_selector(".propertyCard-address")
                     location = await loc_el.text_content() if loc_el else ""
@@ -166,7 +164,7 @@ class RightmoveScraper:
             await page.close()
 
     async def close(self):
-        """Close Playwright context."""
+        """Close browser context and Playwright."""
         if self.context:
             await self.context.close()
         if self.playwright:
