@@ -2,27 +2,19 @@ import asyncio
 import random
 import datetime
 from pathlib import Path
+from playwright.async_api import async_playwright, Playwright, BrowserContext
 
 class CaptchaError(Exception):
     pass
 
 class RightmoveScraper:
     def __init__(self):
-        self.playwright = None
-        self.context = None
+        self.playwright: Playwright = None
+        self.context: BrowserContext = None
         self.backoff_count = 0
 
     async def _init(self):
         if not self.playwright:
-            try:
-                from playwright.async_api import async_playwright
-            except ImportError:
-                raise RuntimeError(
-                    "Playwright is not installed. Please run:\n"
-                    "    pip install playwright\n"
-                    "    playwright install"
-                )
-            self._async_playwright = async_playwright
             self.playwright = await async_playwright().start()
         if not self.context:
             data_dir = Path(__file__).parent / "userdata"
@@ -41,8 +33,7 @@ class RightmoveScraper:
             user_agent = random.choice(ua_list)
             width = random.randint(1200, 1920)
             height = random.randint(700, 1080)
-            browser_type = self.playwright.chromium
-            self.context = await browser_type.launch_persistent_context(
+            self.context = await self.playwright.chromium.launch_persistent_context(
                 user_data_dir=str(dir_path),
                 headless=True,
                 args=["--no-sandbox"],
@@ -71,7 +62,7 @@ class RightmoveScraper:
         page = await self.context.new_page()
         try:
             if random.random() < 0.3:
-                extras = ["/news","/why-buy","/help","/offers-for-sellers","/guides","/overseas"]
+                extras = ["/news", "/why-buy", "/help", "/offers-for-sellers", "/guides", "/overseas"]
                 await page.goto(f"https://www.rightmove.co.uk{random.choice(extras)}")
                 await page.wait_for_load_state("networkidle")
                 await asyncio.sleep(random.uniform(2,4))
@@ -82,18 +73,22 @@ class RightmoveScraper:
             await asyncio.sleep(random.uniform(2,5))
             if "captcha" in page.url.lower():
                 raise CaptchaError("Captcha page detected")
-            viewport = await page.viewport_size()
+            # random mouse movements
+            viewport = page.viewport_size
             for _ in range(random.randint(5,10)):
                 x = random.randint(0, viewport["width"])
                 y = random.randint(0, viewport["height"])
                 await page.mouse.move(x, y, steps=random.randint(5,20))
                 await asyncio.sleep(random.uniform(0.1,0.5))
+            # random scrolling
             scroll_height = await page.evaluate("document.body.scrollHeight")
             for _ in range(random.randint(2,5)):
                 pos = random.randint(0, scroll_height)
                 await page.evaluate(f"window.scrollTo(0, {pos})")
                 await asyncio.sleep(random.uniform(0.5,1.5))
+            # simulate returning user
             await page.evaluate("localStorage.setItem('visit_time', Date.now().toString())")
+            # search
             try:
                 await page.click('input[id="searchLocation"]')
                 await page.fill('input[id="searchLocation"]', area)
@@ -106,9 +101,11 @@ class RightmoveScraper:
                 await page.click('button[type="submit"]')
             await page.wait_for_load_state("networkidle")
             await asyncio.sleep(random.uniform(2,4))
+            # more scrolling
             scroll_height = await page.evaluate("document.body.scrollHeight")
             await page.evaluate(f"window.scrollTo(0, {random.randint(0, scroll_height)})")
             await asyncio.sleep(random.uniform(1,2))
+            # extract listings
             cards = await page.query_selector_all(".propertyCard")
             results = []
             for card in cards:
