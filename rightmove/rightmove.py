@@ -165,7 +165,7 @@ class RightmoveData:
                 )
             )
 
-            # URL & ID — TRY MULTIPLE XPATHS TO FIND IT
+            # URL & ID
             href = c.xpath(".//a[@data-test='property-details']/@href")
             if not href:
                 href = c.xpath(".//a[@data-testid='property-details-lozenge']/@href")
@@ -217,7 +217,6 @@ class RightmoveData:
                 "agent_url":       agent_url,
             })
 
-        # Build with explicit columns so 'type' never disappears
         columns = [
             "id", "price", "address", "type",
             "number_bedrooms", "listed_ts", "updated_ts",
@@ -225,7 +224,6 @@ class RightmoveData:
         ]
         df = pd.DataFrame.from_records(rows, columns=columns)
 
-        # Clean price & drop rows missing id/price/address
         df["price"] = (
             df["price"]
               .replace(r"\D+", "", regex=True)
@@ -237,11 +235,10 @@ class RightmoveData:
         return df
 
     def _get_results(self, get_floorplans: bool) -> pd.DataFrame:
-        # Always fetch page 1 first
+        # Always fetch page 1
         df = self._get_page(self._first_page, get_floorplans)
         page = 1
         while True:
-            # build URL for the next page
             u = f"{self._url}&index={page * 24}"
             sc, ct = self._request(u)
             if sc != 200:
@@ -361,28 +358,20 @@ class RightmoveCog(commands.Cog):
         )]
         df = df[~df["type"].str.lower().isin(BANNED_PROPERTY_TYPES)]
 
-        # Load cache
+        # Load cache and compute diffs
         cache     = await self.config.properties()
         new_props = {r["id"]: r for _, r in df.iterrows()}
         old_ids   = set(cache)
         new_ids   = set(new_props)
         guild     = self.target_channel.guild
 
-        # Find or create target category
-        existing = [c for c in guild.categories if c.name.startswith(CATEGORY_PREFIX)]
-        existing.sort(key=lambda c: int(c.name.split()[-1]) if c.name.split()[-1].isdigit() else 1)
-        target_cat = None
-        for cat in existing:
-            cnt = sum(
-                1 for ch in cat.channels
-                if isinstance(ch, discord.TextChannel) and ch.name.startswith("prop-")
-            )
-            if cnt < MAX_PER_CATEGORY:
-                target_cat = cat
-                break
-        if not target_cat:
-            idx = int(existing[-1].name.split()[-1]) + 1 if existing else 1
-            target_cat = await guild.create_category(f"{CATEGORY_PREFIX} {idx}")
+        # Prepare existing RIGHTMOVE categories
+        existing_cats = [
+            c for c in guild.categories if c.name.startswith(CATEGORY_PREFIX)
+        ]
+        existing_cats.sort(
+            key=lambda c: int(c.name.split()[-1]) if c.name.split()[-1].isdigit() else 0
+        )
 
         # New & updates
         for pid, r in new_props.items():
@@ -392,6 +381,21 @@ class RightmoveCog(commands.Cog):
             stc_changed   = r["is_stc"] and not old.get("is_stc", False)
 
             if is_new:
+                # Find or create a category with room (< MAX_PER_CATEGORY channels)
+                for cat in existing_cats:
+                    if len(cat.channels) < MAX_PER_CATEGORY:
+                        target_cat = cat
+                        break
+                else:
+                    nums = [
+                        int(c.name.split()[-1])
+                        for c in existing_cats
+                        if c.name.split()[-1].isdigit()
+                    ]
+                    next_idx = max(nums) + 1 if nums else 1
+                    target_cat = await guild.create_category(f"{CATEGORY_PREFIX} {next_idx}")
+                    existing_cats.append(target_cat)
+
                 ch = await guild.create_text_channel(f"prop-{pid}", category=target_cat)
                 cache[pid] = {
                     "channel_id":   ch.id,
