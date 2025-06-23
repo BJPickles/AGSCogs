@@ -12,7 +12,6 @@ from .filter_utils import seconds_until_next_scrape, filter_listings, now_in_win
 
 logging.getLogger('playwright').setLevel(logging.CRITICAL)
 
-
 class RightmoveAlert(commands.Cog):
     """Cog to alert users of new Rightmove listings based on configurable filters."""
     def __init__(self, bot):
@@ -78,6 +77,7 @@ class RightmoveAlert(commands.Cog):
         try:
             interval = seconds_until_next_scrape()
             self.scraping_loop.change_interval(seconds=interval)
+
             users = await self.config.all_users()
             enabled = {
                 int(uid): data
@@ -86,21 +86,26 @@ class RightmoveAlert(commands.Cog):
             }
             if not enabled:
                 return
+
+            # group by area
             area_map = {}
             for uid, data in enabled.items():
-                area = data.get("area")
-                area_map.setdefault(area, []).append((uid, data))
+                area_map.setdefault(data["area"], []).append((uid, data))
 
             async def process_area(area, user_list):
                 async with self.scrape_sem:
                     for uid, data in user_list:
-                        now = datetime.datetime.now(self.tz)
+                        # check user-defined active hours
                         if not now_in_windows(data.get("active_hours")):
                             continue
+
+                        # pull out all three scrape args
+                        maxp = data.get("maxprice")
+                        minb = data.get("minbeds")
+                        rc   = data.get("region_code")
+
                         try:
-                            maxp = data.get("maxprice")
-                            region = data.get("region_code")
-                            listings = await self.scraper.scrape_area(area, maxp, region)
+                            listings = await self.scraper.scrape_area(area, maxp, minb, rc)
                             self.scraper.backoff_count = 0
                         except CaptchaError as e:
                             await self.log_event(f"Captcha detected for area '{area}': {e}")
@@ -115,11 +120,13 @@ class RightmoveAlert(commands.Cog):
                             await asyncio.sleep(delay)
                             continue
 
-                        async with getattr(self.config, "global")() as g:
+                        # increment global counters
+                        async with self.config.bot() as g:
                             g["listings_checked"] += len(listings)
 
                         matches, blocked = filter_listings(listings, data)
-                        async with getattr(self.config, "global")() as g:
+
+                        async with self.config.bot() as g:
                             g["matched"] += len(matches)
                             g["blocked"] += blocked
 
@@ -127,21 +134,26 @@ class RightmoveAlert(commands.Cog):
                         new = [l for l in matches if l["id"] not in seen]
                         if not new:
                             continue
+
                         for listing in new:
                             await self.handle_listing(uid, listing)
                             seen.add(listing["id"])
+
                         await self.config.user(uid).seen.set(list(seen))
-                        async with getattr(self.config, "global")() as g:
+
+                        async with self.config.bot() as g:
                             ua = g.get("user_alerts", {})
                             ua[str(uid)] = ua.get(str(uid), 0) + len(new)
                             g["user_alerts"] = ua
 
+            # fire off all area tasks in parallel
             tasks_list = [
                 asyncio.create_task(process_area(area, ul))
                 for area, ul in area_map.items()
             ]
             if tasks_list:
                 await asyncio.gather(*tasks_list)
+
         except Exception as e:
             await self.log_event(f"Error in scraping loop: {e}")
 
@@ -150,17 +162,18 @@ class RightmoveAlert(commands.Cog):
         """Post a daily summary of statistics each day at 23:59."""
         try:
             now_ts = int(datetime.datetime.now(self.tz).timestamp())
-            g = await getattr(self.config, "global")()
+            g = await self.config.bot()
             listings_checked = g.get("listings_checked", 0)
-            matched = g.get("matched", 0)
-            blocked = g.get("blocked", 0)
-            user_alerts = g.get("user_alerts", {})
-            unique_users = len([u for u, v in user_alerts.items() if v > 0])
+            matched           = g.get("matched", 0)
+            blocked           = g.get("blocked", 0)
+            user_alerts       = g.get("user_alerts", {})
+            unique_users      = len([u for u, v in user_alerts.items() if v > 0])
+
             embed = discord.Embed(title="Daily Summary")
-            embed.add_field(name="Listings Checked", value=str(listings_checked), inline=True)
-            embed.add_field(name="Listings Matched", value=str(matched), inline=True)
-            embed.add_field(name="Blocked by Blacklist", value=str(blocked), inline=True)
-            embed.add_field(name="Unique Users Alerted", value=str(unique_users), inline=True)
+            embed.add_field(name="Listings Checked",       value=str(listings_checked), inline=True)
+            embed.add_field(name="Listings Matched",       value=str(matched),           inline=True)
+            embed.add_field(name="Blocked by Blacklist",   value=str(blocked),           inline=True)
+            embed.add_field(name="Unique Users Alerted",   value=str(unique_users),      inline=True)
             embed.add_field(
                 name="Generated",
                 value=f"<t:{now_ts}:F> (<t:{now_ts}:R>)",
@@ -178,11 +191,13 @@ class RightmoveAlert(commands.Cog):
                         except:
                             pass
 
-            async with getattr(self.config, "global")() as g2:
+            # reset globals
+            async with self.config.bot() as g2:
                 g2["listings_checked"] = 0
-                g2["matched"] = 0
-                g2["blocked"] = 0
-                g2["user_alerts"] = {}
+                g2["matched"]          = 0
+                g2["blocked"]          = 0
+                g2["user_alerts"]      = {}
+
         except Exception as e:
             await self.log_event(f"Error in daily summary: {e}")
 
@@ -351,9 +366,12 @@ class RightmoveAlert(commands.Cog):
         data = await self.config.user(ctx.author).all()
         if not data.get("area"):
             return await ctx.send("Please set your area or region first.")
+
         maxp = data.get("maxprice")
-        region = data.get("region_code")
-        listings = await self.scraper.scrape_area(data.get("area"), maxp, region)
+        minb = data.get("minbeds")
+        rc   = data.get("region_code")
+
+        listings = await self.scraper.scrape_area(data["area"], maxp, minb, rc)
         if listings:
             await self.handle_listing(ctx.author.id, listings[0])
             await ctx.send("Test alert sent.")
@@ -381,7 +399,9 @@ class RightmoveAlert(commands.Cog):
         embed.add_field(name="Night Interval", value=(f"{ni[0]}s-{ni[1]}s" if ni else "Default"), inline=True)
         embed.add_field(name="Seen", value=str(len(data.get("seen", []))), inline=True)
         guild_cfg = await self.config.guild(ctx.guild).all()
-        ac, lc, sc = guild_cfg.get("alert_channel"), guild_cfg.get("log_channel"), guild_cfg.get("summary_channel")
+        ac = guild_cfg.get("alert_channel")
+        lc = guild_cfg.get("log_channel")
+        sc = guild_cfg.get("summary_channel")
         embed.add_field(name="Alert Channel", value=(f"<#{ac}>" if ac else "None"), inline=True)
         embed.add_field(name="Log Channel", value=(f"<#{lc}>" if lc else "None"), inline=True)
         embed.add_field(name="Summary Channel", value=(f"<#{sc}>" if sc else "None"), inline=True)

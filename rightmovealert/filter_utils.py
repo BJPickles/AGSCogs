@@ -19,13 +19,15 @@ def seconds_until_next_scrape() -> int:
 
 def now_in_windows(windows: list) -> bool:
     """
-    Given windows = [[“HH:MM”,”HH:MM”], …], return True if current time falls in any.
+    Given windows = [["HH:MM","HH:MM"], …], return True if current time
+    (Europe/London) falls in any window.
     """
-    now_time = datetime.datetime.now(tz).time()
+    # get a naive time so we don’t compare aware <-> naive
+    now_time = datetime.datetime.now(tz).time().replace(tzinfo=None)
     for start, end in windows:
         try:
             s = datetime.datetime.strptime(start, "%H:%M").time()
-            e = datetime.datetime.strptime(end, "%H:%M").time()
+            e = datetime.datetime.strptime(end,   "%H:%M").time()
             if s <= now_time <= e:
                 return True
         except Exception:
