@@ -145,7 +145,7 @@ class RightmoveData:
                 ".//span[contains(@class,'PropertyInformation_bedroomsCount')]/text()"
             )
             try:
-                beds = int(bd[0]) if bd else None
+                beds = float(bd[0]) if bd else None
             except ValueError:
                 beds = None
 
@@ -183,7 +183,7 @@ class RightmoveData:
                     img_url = img_tag.get("src") or None
             else:
                 img_url = None
-            # ensure full URL
+            # normalize protocol-relative
             if img_url and img_url.startswith("//"):
                 img_url = "https:" + img_url
 
@@ -491,18 +491,39 @@ class RightmoveCog(commands.Cog):
             )
             embed = discord.Embed(title=title, color=color, description=desc)
 
-            # use the big picture in the body
+            # large image in the embed body
             if r["image_url"]:
                 embed.set_image(url=r["image_url"])
 
+            # price
             embed.add_field(name="💷 Price", value=f"£{int(price):,}", inline=True)
-            embed.add_field(name="🛏 Bedrooms", value=str(r["number_bedrooms"]), inline=True)
+
+            # bedrooms (cast to int so "1.0" becomes "1")
+            beds = r.get("number_bedrooms")
+            beds_str = str(int(beds)) if isinstance(beds, (int, float)) else "N/A"
+            embed.add_field(name="🛏 Bedrooms", value=beds_str, inline=True)
+
+            # property type
             embed.add_field(name="🏠 Type", value=r["type"], inline=True)
+
+            # agent
             if r["agent"] and r["agent_url"]:
                 embed.add_field(
-                    name="🔗 Agent", value=f"[{r['agent']}]({r['agent_url']})", inline=True
+                    name="🔗 Agent",
+                    value=f"[{r['agent']}]({r['agent_url']})",
+                    inline=True
                 )
+
+            # direct Rightmove listing link
+            if r["url"]:
+                embed.add_field(
+                    name="🔗 Listing",
+                    value=f"[View on Rightmove]({r['url']})",
+                    inline=False
+                )
+
             await ch.send(embed=embed)
+
         else:
             # vanished
             emoji, pre, color = emojis["vanished"]
