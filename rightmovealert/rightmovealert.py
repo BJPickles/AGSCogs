@@ -10,7 +10,10 @@ from discord.ext import tasks
 from redbot.core import commands, Config
 
 from .scraper import RightmoveScraper, CaptchaError
-from .filters import seconds_until_next_scrape, filter_listings, now_in_windows
+from .filter_utils import seconds_until_next_scrape, filter_listings, now_in_windows
+
+# DEBUG: show what filter_listings really is
+print("filter_listings ->", filter_listings, type(filter_listings))
 
 logging.getLogger('playwright').setLevel(logging.CRITICAL)
 
@@ -32,8 +35,8 @@ class RightmoveAlert(commands.Cog):
             "customblacklist": [],
             "blacklistleasehold": True,
             "seen": [],
-            "active_hours": [["08:00","12:30"],["14:00","22:00"]],
-            "night_interval": [900,2700]
+            "active_hours": [["08:00", "12:30"], ["14:00", "22:00"]],
+            "night_interval": [900, 2700]
         }
         guild_defaults = {
             "alert_channel": None,
@@ -49,12 +52,22 @@ class RightmoveAlert(commands.Cog):
         self.config.register_user(**user_defaults)
         self.config.register_guild(**guild_defaults)
         self.config.register_global(**global_defaults)
+        self._startup_logged = False
 
     async def cog_load(self):
         """Start scraping and summary tasks on cog load."""
         self.scrape_sem = asyncio.Semaphore(3)
         self.scraping_loop.start()
         self.daily_summary.start()
+        self.bot.loop.create_task(self._delayed_startup_log())
+
+    async def _delayed_startup_log(self):
+        """Log cog load once bot is ready."""
+        await self.bot.wait_until_ready()
+        if self._startup_logged:
+            return
+        self._startup_logged = True
+        await asyncio.sleep(5)
         await self.log_event("Cog loaded and tasks started.")
 
     async def cog_unload(self):
@@ -101,7 +114,7 @@ class RightmoveAlert(commands.Cog):
                         return
 
                     async with getattr(self.config, "global")() as g:
-                        g['listings_checked'] += len(listings)
+                        g["listings_checked"] += len(listings)
 
                     for uid, data in user_list:
                         if not now_in_windows(data.get("active_hours")):
@@ -109,8 +122,8 @@ class RightmoveAlert(commands.Cog):
                         try:
                             matches, blocked = filter_listings(listings, data)
                             async with getattr(self.config, "global")() as g:
-                                g['matched'] += len(matches)
-                                g['blocked'] += blocked
+                                g["matched"] += len(matches)
+                                g["blocked"] += blocked
                             seen = set(data.get("seen", []))
                             new = [l for l in matches if l["id"] not in seen]
                             if not new:
@@ -120,9 +133,9 @@ class RightmoveAlert(commands.Cog):
                                 seen.add(listing["id"])
                             await self.config.user(uid).seen.set(list(seen))
                             async with getattr(self.config, "global")() as g:
-                                ua = g.get('user_alerts', {})
+                                ua = g.get("user_alerts", {})
                                 ua[str(uid)] = ua.get(str(uid), 0) + len(new)
-                                g['user_alerts'] = ua
+                                g["user_alerts"] = ua
                         except Exception as e:
                             await self.log_event(f"Error processing user {uid} listings: {e}")
 
@@ -141,10 +154,10 @@ class RightmoveAlert(commands.Cog):
         try:
             now_ts = int(datetime.datetime.now(self.tz).timestamp())
             g = await getattr(self.config, "global")()
-            listings_checked = g.get('listings_checked', 0)
-            matched = g.get('matched', 0)
-            blocked = g.get('blocked', 0)
-            user_alerts = g.get('user_alerts', {})
+            listings_checked = g.get("listings_checked", 0)
+            matched = g.get("matched", 0)
+            blocked = g.get("blocked", 0)
+            user_alerts = g.get("user_alerts", {})
             unique_users = len([u for u, v in user_alerts.items() if v > 0])
             embed = discord.Embed(title="Daily Summary")
             embed.add_field(name="Listings Checked", value=str(listings_checked), inline=True)
@@ -169,10 +182,10 @@ class RightmoveAlert(commands.Cog):
                             pass
 
             async with getattr(self.config, "global")() as g2:
-                g2['listings_checked'] = 0
-                g2['matched'] = 0
-                g2['blocked'] = 0
-                g2['user_alerts'] = {}
+                g2["listings_checked"] = 0
+                g2["matched"] = 0
+                g2["blocked"] = 0
+                g2["user_alerts"] = {}
         except Exception as e:
             await self.log_event(f"Error in daily summary: {e}")
 
@@ -199,14 +212,14 @@ class RightmoveAlert(commands.Cog):
             url=listing.get("url")
         )
         embed.add_field(name="Price", value=f"£{listing.get('price')}", inline=True)
-        embed.add_field(name="Beds", value=str(listing.get('beds')), inline=True)
-        embed.add_field(name="Location", value=listing.get('location', "Unknown"), inline=False)
+        embed.add_field(name="Beds", value=str(listing.get("beds")), inline=True)
+        embed.add_field(name="Location", value=listing.get("location", "Unknown"), inline=False)
         embed.add_field(
             name="Scraped At",
             value=f"<t:{now_ts}:F> (<t:{now_ts}:R>)",
             inline=False
         )
-        file_bytes = listing.get('screenshot')
+        file_bytes = listing.get("screenshot")
         filename = f"{listing.get('id')}.png" if file_bytes else None
         if file_bytes:
             embed.set_image(url=f"attachment://{filename}")
@@ -454,7 +467,7 @@ class RightmoveAlert(commands.Cog):
         bl = data.get("customblacklist", [])
         embed.add_field(name="Custom Blacklist", value=", ".join(bl) or "None", inline=False)
         embed.add_field(name="Blacklist Leasehold", value=str(data.get("blacklistleasehold")), inline=True)
-        ah = ", ".join([f"{a[0]}-{a[1]}" for a in data.get("active_hours", [])])
+        ah = ", ".join(f"{a[0]}-{a[1]}" for a in data.get("active_hours", []))
         embed.add_field(name="Active Hours", value=ah or "Default", inline=True)
         ni = data.get("night_interval", [])
         ni_text = f"{ni[0]}s-{ni[1]}s" if ni else "Default"
@@ -464,25 +477,9 @@ class RightmoveAlert(commands.Cog):
         ac = guild_cfg.get("alert_channel")
         lc = guild_cfg.get("log_channel")
         sc = guild_cfg.get("summary_channel")
-        embed.add_field(
-            name="Alert Channel",
-            value=(f"<#{ac}>" if ac else "Not set"),
-            inline=True
-        )
-        embed.add_field(
-            name="Log Channel",
-            value=(f"<#{lc}>" if lc else "Not set"),
-            inline=True
-        )
-        embed.add_field(
-            name="Summary Channel",
-            value=(f"<#{sc}>" if sc else "Not set"),
-            inline=True
-        )
+        embed.add_field(name="Alert Channel", value=(f"<#{ac}>" if ac else "Not set"), inline=True)
+        embed.add_field(name="Log Channel", value=(f"<#{lc}>" if lc else "Not set"), inline=True)
+        embed.add_field(name="Summary Channel", value=(f"<#{sc}>" if sc else "Not set"), inline=True)
         now_ts = int(datetime.datetime.now(self.tz).timestamp())
-        embed.add_field(
-            name="Status Generated",
-            value=f"<t:{now_ts}:F> (<t:{now_ts}:R>)",
-            inline=False
-        )
+        embed.add_field(name="Status Generated", value=f"<t:{now_ts}:F> (<t:{now_ts}:R>)", inline=False)
         await ctx.send(embed=embed)
