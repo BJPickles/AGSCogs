@@ -19,8 +19,8 @@ from redbot.core import Config, commands
 # ----------------------------
 # Configuration / Thresholds
 # ----------------------------
-CATEGORY_PREFIX      = "RIGHTMOVE"        # e.g. RIGHTMOVE 1, RIGHTMOVE 2, …
-MAX_PER_CATEGORY     = 50                 # up to 50 prop- channels per category
+CATEGORY_PREFIX      = "RIGHTMOVE"
+MAX_PER_CATEGORY     = 50
 LONDON               = ZoneInfo("Europe/London")
 SCRAPE_TIME          = dt_time(hour=7, minute=0, tzinfo=LONDON)
 
@@ -53,13 +53,11 @@ BANNED_TYPE_SUBSTRINGS = [
 
 
 class RightmoveData:
-    """Scrapes Rightmove search results and returns a DataFrame of properties."""
+    """Scrapes Rightmove search results and returns a DataFrame."""
 
     def __init__(self, url: str, get_floorplans: bool = False):
         self._status_code, self._first_page = self._request(url)
         self._url = url
-        # strict URL validation disabled for long encoded URL
-        # self._validate_url()
         self._results = self._get_results(get_floorplans=get_floorplans)
 
     @staticmethod
@@ -130,7 +128,7 @@ class RightmoveData:
             ad = c.xpath(".//*[@data-testid='property-address']//address/text()")
             address = ad[0].strip() if ad else None
 
-            # Property type (with fallback)
+            # Property type
             tp = c.xpath(
                 ".//span[contains(@class,'PropertyInformation_propertyType')]/text()"
             )
@@ -149,7 +147,7 @@ class RightmoveData:
             except ValueError:
                 beds = None
 
-            # Listed / Updated
+            # Listed / Updated timestamps
             ld = c.xpath(
                 ".//span[contains(@class,'MarketedBy_joinedText')]/text()"
             ) or [None]
@@ -167,11 +165,19 @@ class RightmoveData:
                 )
             )
 
-            # URL — FIXED: your HTML uses data-test, not data-testid
+            # URL & ID — TRY MULTIPLE XPATHS TO FIND IT
             href = c.xpath(".//a[@data-test='property-details']/@href")
-            url  = f"{base}{href[0]}" if href else None
+            if not href:
+                href = c.xpath(".//a[@data-testid='property-details-lozenge']/@href")
+            if not href:
+                href = c.xpath(".//a[contains(@href,'/properties/')]/@href")
+            url = f"{base}{href[0]}" if href else None
+            pid = None
+            if url:
+                m2 = re.search(r"/properties/(\d+)", url)
+                pid = m2.group(1) if m2 else None
 
-            # First image (highest-res from srcset)
+            # First image
             img_elems = c.xpath(".//img[@data-testid='property-img-1']") or []
             if img_elems:
                 img_el = img_elems[0]
@@ -196,17 +202,11 @@ class RightmoveData:
             )
             agent_url = f"{base}{au[0]}" if au else None
 
-            # Property ID
-            pid = None
-            if url:
-                m2 = re.search(r"/properties/(\d+)", url)
-                pid = m2.group(1) if m2 else None
-
             rows.append({
                 "id":              pid,
                 "price":           price_raw,
                 "address":         address,
-                "type":            ptype,            # <-- guaranteed below
+                "type":            ptype,
                 "number_bedrooms": beds,
                 "listed_ts":       listed_ts,
                 "updated_ts":      updated_ts,
@@ -217,24 +217,15 @@ class RightmoveData:
                 "agent_url":       agent_url,
             })
 
-        # Build DataFrame *with explicit columns* so "type" is never missing
+        # Build with explicit columns so 'type' never disappears
         columns = [
-            "id",
-            "price",
-            "address",
-            "type",
-            "number_bedrooms",
-            "listed_ts",
-            "updated_ts",
-            "is_stc",
-            "url",
-            "image_url",
-            "agent",
-            "agent_url",
+            "id", "price", "address", "type",
+            "number_bedrooms", "listed_ts", "updated_ts",
+            "is_stc", "url", "image_url", "agent", "agent_url",
         ]
         df = pd.DataFrame.from_records(rows, columns=columns)
 
-        # Clean up price and drop rows missing essential data
+        # Clean price & drop rows missing id/price/address
         df["price"] = (
             df["price"]
               .replace(r"\D+", "", regex=True)
@@ -258,14 +249,11 @@ class RightmoveData:
 
 
 class RightmoveCog(commands.Cog):
-    """A cog that scrapes Rightmove daily at 07:00 London with full caching,
-       multi-category channel rollover, STC/vanished detection, embed‐editing,
-       and price-ascending reordering."""
+    """A cog that scrapes Rightmove daily at 07:00 London…"""
 
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=1234567890)
-        # store { property_id: { channel_id, message_id, price, listed_ts, updated_ts, is_stc, active } }
         self.config.register_global(properties={})
         self.scrape_loop     = None
         self.target_channel  = None
@@ -279,7 +267,7 @@ class RightmoveCog(commands.Cog):
     @commands.is_owner()
     @commands.group(name="rm", invoke_without_command=True)
     async def rm(self, ctx):
-        """Rightmove commands: `.rm start`, `.rm stop`, `.rm test`"""
+        """Rightmove commands: .rm start .rm stop .rm test"""
         await ctx.send_help(ctx.command)
 
     @rm.command(name="start")
@@ -290,8 +278,7 @@ class RightmoveCog(commands.Cog):
         self.scrape_loop = tasks.loop(time=SCRAPE_TIME)(self.do_scrape)
         self.scrape_loop.start()
         await ctx.send(
-            f"✅ Scheduled daily scrape at 07:00 Europe/London.\n"
-            f"Channels will live in `{CATEGORY_PREFIX} 1`, `{CATEGORY_PREFIX} 2`, etc."
+            f"✅ Scheduled daily scrape at 07:00 Europe/London in channel {self.target_channel.mention}."
         )
 
     @rm.command(name="stop")
@@ -318,16 +305,14 @@ class RightmoveCog(commands.Cog):
 
         if self._rebuild_lock.locked() and not override:
             return await ctx.send(
-                "❌ A rebuild is already in progress.\n"
-                "Use `.rm test override` to force."
+                "❌ A rebuild is already in progress. Use `.rm test override` to force."
             )
 
         now = time.time()
         if (now - self._last_test) < 300 and not override:
             rem = int(300 - (now - self._last_test))
             return await ctx.send(
-                f"❌ You must wait {rem}s before running `.rm test` again,\n"
-                "or use `.rm test override`."
+                f"❌ You must wait {rem}s before running `.rm test` again, or use override."
             )
         self._last_test = now
 
@@ -337,35 +322,37 @@ class RightmoveCog(commands.Cog):
         await ctx.send("✅ Manual scrape done.")
 
     async def do_scrape(self, force_refresh: bool = False):
-        url = "https://www.rightmove.co.uk/…"
-        df = RightmoveData(url).get_results
+        url = (
+            "https://www.rightmove.co.uk/property-for-sale/find.html?"
+            "sortType=1&viewType=LIST&channel=BUY"
+            "&maxPrice=250000&radius=0.0"
+            "&locationIdentifier=USERDEFINEDAREA%5E%7B"
+            "%22polylines%22%3A%22sh%7CtHhu%7BE%7D%7CDr_Nf%7B"
+            "AnjZxvLz%7Df%40reAllgA%7Bab%40fg%60%40kyu%40s_"
+            "Ncq_%40crl%40uvO%7Dc%7C%40jTozbAlvMadq%40fu%5Bas"
+            "Zpmi%40%7BeMjgf%40jdEhpJt%7BZ_%60Jlpz%40%22%7D"
+            "&tenureTypes=FREEHOLD&transactionType=BUY"
+            "&mustHave=parking"
+            "&dontShow=newHome%2Cretirement%2CsharedOwnership%2Cauction"
+        )
+        data = RightmoveData(url)
+        # HTTP check
+        if data._status_code != 200:
+            return await self.target_channel.send(f"❌ HTTP {data._status_code}, aborting.")
+        df = data.get_results
 
-        # ─────── BEGIN DEBUG BLOCK ───────
-        # Send the columns and a few sample rows back into Discord
-        try:
-            cols = df.columns.tolist()
-            sample = df.head(5).to_dict(orient="records")
-            await self.target_channel.send(
-                "DEBUG: RightmoveData returned:\n"
-                f"Columns: `{cols}`\n"
-                f"Sample rows (up to 5):\n```json\n{sample}\n```"
+        # Bail out if nothing scraped
+        if df.empty:
+            return await self.target_channel.send(
+                f"⚠️ Scrape returned {data.results_count_display} results "
+                f"but DataFrame is empty. Check your XPaths or URL."
             )
-        except Exception as e:
-            await self.target_channel.send(f"DEBUG: could not dump df: {e}")
-        # ─────── END DEBUG BLOCK ───────
 
-        # safety-net: although from_records guarantees it, double-check
-        if "type" not in df.columns:
-            df["type"] = np.nan
-
-        # drop listings with no type
+        # Now safe to filter on 'type'
         df = df[df["type"].notna()]
-
-        # filter banned substrings
         df = df[~df["type"].str.lower().apply(
             lambda t: any(sub in t for sub in BANNED_TYPE_SUBSTRINGS)
         )]
-        # filter exact banned types
         df = df[~df["type"].str.lower().isin(BANNED_PROPERTY_TYPES)]
 
         cache     = await self.config.properties()
@@ -374,14 +361,13 @@ class RightmoveCog(commands.Cog):
         new_ids   = set(new_props)
         guild     = self.target_channel.guild
 
-        # find or create the right category chunk
+        # Find or create target category
         existing = [c for c in guild.categories if c.name.startswith(CATEGORY_PREFIX)]
         existing.sort(key=lambda c: int(c.name.split()[-1]) if c.name.split()[-1].isdigit() else 1)
         target_cat = None
         for cat in existing:
             cnt = sum(
-                1
-                for ch in cat.channels
+                1 for ch in cat.channels
                 if isinstance(ch, discord.TextChannel) and ch.name.startswith("prop-")
             )
             if cnt < MAX_PER_CATEGORY:
@@ -391,7 +377,7 @@ class RightmoveCog(commands.Cog):
             idx = int(existing[-1].name.split()[-1]) + 1 if existing else 1
             target_cat = await guild.create_category(f"{CATEGORY_PREFIX} {idx}")
 
-        # handle new, price changes, STC
+        # New & updates
         for pid, r in new_props.items():
             is_new        = pid not in cache
             old           = cache.get(pid, {})
@@ -428,7 +414,7 @@ class RightmoveCog(commands.Cog):
                 await self._send_or_edit(ch, pid, r, event="price_update")
                 continue
 
-        # handle vanished
+        # Vanished
         for pid in old_ids - new_ids:
             old = cache[pid]
             if old.get("active", True):
@@ -439,23 +425,22 @@ class RightmoveCog(commands.Cog):
 
         await self.config.properties.set(cache)
 
-        # force-refresh all active
+        # Force‐refresh
         if force_refresh:
             for pid, r in new_props.items():
-                data = cache.get(pid, {})
-                if not data.get("active"):
+                data2 = cache.get(pid, {})
+                if not data2.get("active"):
                     continue
-                ch = guild.get_channel(data["channel_id"])
+                ch = guild.get_channel(data2["channel_id"])
                 if ch:
                     await self._send_or_edit(ch, pid, r, event="refresh")
 
-        # finally reorder every category by ascending price
+        # Reorder
         await self._reorder_channels()
 
     async def _send_or_edit(self, ch: discord.TextChannel, pid: str, r, event: str):
         cache = await self.config.properties()
         data  = cache[pid]
-
         emojis = {
             "new":           ("🆕", "New", None),
             "price_update":  ("🔄", "Price Updated", None),
@@ -465,8 +450,8 @@ class RightmoveCog(commands.Cog):
         }
         emoji, pre, color = emojis[event]
 
-        # Build the embed
         if r is not None:
+            # Choose color
             price = r["price"]
             if color is None:
                 if abs(price - TARGET_PRICE) <= IDEAL_DELTA:
@@ -478,17 +463,18 @@ class RightmoveCog(commands.Cog):
                 else:
                     color = discord.Color.red()
 
-            title = r["address"] if event == "refresh" else f"{emoji} {pre} — {r['address']}"
-            desc  = (
+            title = r["address"] if event=="refresh" else f"{emoji} {pre} — {r['address']}"
+            desc = (
                 f"Listed: <t:{r['listed_ts']}:F> (<t:{r['listed_ts']}:R>)\n"
                 f"Updated: <t:{r['updated_ts']}:F> (<t:{r['updated_ts']}:R>)"
             )
             embed = discord.Embed(title=title, color=color, description=desc)
             if r["image_url"]:
                 embed.set_image(url=r["image_url"])
+
             embed.add_field(name="💷 Price", value=f"£{int(price):,}", inline=True)
             beds = r.get("number_bedrooms")
-            beds_str = str(int(beds)) if isinstance(beds, (int,float)) and not math.isnan(beds) else "N/A"
+            beds_str = str(int(beds)) if isinstance(beds,(int,float)) and not math.isnan(beds) else "N/A"
             embed.add_field(name="🛏 Bedrooms", value=beds_str, inline=True)
             embed.add_field(name="🏠 Type", value=r["type"], inline=True)
             if r["agent"] and r["agent_url"]:
@@ -496,7 +482,7 @@ class RightmoveCog(commands.Cog):
             if r["url"]:
                 embed.add_field(name="🔗 Listing", value=f"[View on Rightmove]({r['url']})", inline=False)
         else:
-            # vanished embed
+            # vanished
             emoji2, pre2, color2 = emojis["vanished"]
             embed = discord.Embed(
                 title=f"{emoji2} {pre2}",
@@ -504,7 +490,6 @@ class RightmoveCog(commands.Cog):
                 description="This property has vanished from the search.",
             )
 
-        # Send or edit the message
         msg_id = data.get("message_id")
         try:
             if msg_id:
