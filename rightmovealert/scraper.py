@@ -2,19 +2,27 @@ import asyncio
 import random
 import datetime
 from pathlib import Path
-from playwright.async_api import async_playwright, Playwright, BrowserContext
 
 class CaptchaError(Exception):
     pass
 
 class RightmoveScraper:
     def __init__(self):
-        self.playwright: Playwright = None
-        self.context: BrowserContext = None
+        self.playwright = None
+        self.context = None
         self.backoff_count = 0
 
     async def _init(self):
         if not self.playwright:
+            try:
+                from playwright.async_api import async_playwright
+            except ImportError:
+                raise RuntimeError(
+                    "Playwright is not installed. Please run:\n"
+                    "    pip install playwright\n"
+                    "    playwright install"
+                )
+            self._async_playwright = async_playwright
             self.playwright = await async_playwright().start()
         if not self.context:
             data_dir = Path(__file__).parent / "userdata"
@@ -23,14 +31,18 @@ class RightmoveScraper:
             dir_path = data_dir / today
             dir_path.mkdir(exist_ok=True)
             ua_list = [
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15",
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36"
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+                "(KHTML, like Gecko) Version/15.1 Safari/605.1.15",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36"
             ]
             user_agent = random.choice(ua_list)
             width = random.randint(1200, 1920)
             height = random.randint(700, 1080)
-            self.context = await self.playwright.chromium.launch_persistent_context(
+            browser_type = self.playwright.chromium
+            self.context = await browser_type.launch_persistent_context(
                 user_data_dir=str(dir_path),
                 headless=True,
                 args=["--no-sandbox"],
@@ -48,7 +60,10 @@ class RightmoveScraper:
                 Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 4 });
                 Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
                 const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => parameters.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : originalQuery(parameters);
+                window.navigator.permissions.query = (parameters) =>
+                    parameters.name === 'notifications'
+                        ? Promise.resolve({ state: Notification.permission })
+                        : originalQuery(parameters);
             """)
 
     async def scrape_area(self, area: str) -> list:
