@@ -1,5 +1,3 @@
-# cogs/rightmove/rightmove.py
-
 import datetime
 import time
 
@@ -148,7 +146,6 @@ class RightmoveData:
 
 class RightmoveCog(commands.Cog):
     """Scrapes Rightmove daily and posts new listings in an embed."""
-
     def __init__(self, bot):
         self.bot = bot
         self.target_channel: discord.TextChannel = None
@@ -164,10 +161,8 @@ class RightmoveCog(commands.Cog):
         if self.scrape_loop.is_running():
             return await ctx.send("❌ Already running.")
         self.target_channel = channel or ctx.channel
-        # run immediately once:
-        await self.do_scrape()
-        # then schedule every 24h:
-        self.scrape_loop.start()
+        await self.do_scrape()         # immediate first run
+        self.scrape_loop.start()       # schedule every 24h
         await ctx.send(f"✅ Scraping started. Posting to {self.target_channel.mention}")
 
     @commands.is_owner()
@@ -180,7 +175,6 @@ class RightmoveCog(commands.Cog):
         await ctx.send("✅ Scraping stopped.")
 
     async def do_scrape(self):
-        # your 14-day URL:
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
             "sortType=1&viewType=LIST&channel=BUY"
@@ -196,8 +190,7 @@ class RightmoveCog(commands.Cog):
             "&maxDaysSinceAdded=14"
         )
         ts = int(time.time())
-        rm = RightmoveData(url)
-        df = rm.get_results
+        df = RightmoveData(url).get_results
 
         em = discord.Embed(
             title="📈 New Rightmove Listings (past 14 days)",
@@ -205,7 +198,7 @@ class RightmoveCog(commands.Cog):
             color=discord.Color.blue(),
         )
         if df.empty:
-            em.add_field(name="No new listings", value="None found in the past 14 days.")
+            em.add_field(name="No new listings", value="None found.")
         else:
             for _, r in df.iterrows():
                 em.add_field(
@@ -223,7 +216,3 @@ class RightmoveCog(commands.Cog):
     @tasks.loop(hours=24)
     async def scrape_loop(self):
         await self.do_scrape()
-
-
-def setup(bot):
-    bot.add_cog(RightmoveCog(bot))
