@@ -232,7 +232,7 @@ class RightmoveData:
               .replace("", np.nan)
               .astype(float)
         )
-        #df = df.dropna(subset=["id", "price", "address"])
+        df = df.dropna(subset=["id", "price", "address"])
         df.reset_index(drop=True, inplace=True)
         return df
 
@@ -340,6 +340,11 @@ class RightmoveCog(commands.Cog):
         if data._status_code != 200:
             return await self.target_channel.send(f"❌ HTTP {data._status_code}, aborting.")
         df = data.get_results
+
+        print("🔍 total matches according to page:", data.results_count_display)
+        print("🔍 pages to fetch:", data.page_count)
+        print("🔍 raw cards on page 1:", len(self._get_page(data._first_page, get_floorplans=False)))
+        print("🔍 types on page 1:", set(self._get_page(data._first_page, get_floorplans=False)["type"]))
 
         # Bail out if nothing scraped
         if df.empty:
