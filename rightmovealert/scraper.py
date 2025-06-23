@@ -2,6 +2,7 @@ import asyncio
 import random
 import datetime
 from pathlib import Path
+from urllib.parse import quote, unquote
 from playwright.async_api import async_playwright, Playwright, BrowserContext, TimeoutError as PlaywrightTimeoutError
 
 class CaptchaError(Exception):
@@ -12,6 +13,15 @@ class RightmoveScraper:
         self.playwright: Playwright = None
         self.context: BrowserContext = None
         self.backoff_count = 0
+        # default encoded identifier from your example URL
+        self._default_encoded_identifier = (
+            "USERDEFINEDAREA%5E%7B%22polylines%22%3A%22"
+            "sh%7CtHhu%7BE%7D%7CDr_Nf%7BAnjZxvLz%7Dm%40reAllgA%7Bab"
+            "%40fg%60%40kyu%40s_Ncq_%40crl%40uvO%7Dc%7C%40jTozbAlvMadq"
+            "%40fu%5BasZpmi%40%7BeMjgf%40jdEhpJt%7BZ_%60Jlpz%40%22%7D"
+        )
+        # decode once
+        self._default_identifier = unquote(self._default_encoded_identifier)
 
     async def _init(self):
         if not self.playwright:
@@ -57,10 +67,15 @@ class RightmoveScraper:
                         : originalQuery(parameters);
             """)
 
-    async def scrape_area(self, area: str) -> list:
+    async def scrape_area(self, area: str, max_price: int = None) -> list:
+        """
+        Scrape Rightmove using the direct search URL with filters.
+        Falls back to default encoded identifier if autocomplete fails.
+        """
         await self._init()
         page = await self.context.new_page()
         try:
+            # Optional human-like detour
             if random.random() < 0.3:
                 extras = ["/news","/why-buy","/help","/offers-for-sellers","/guides","/overseas"]
                 await page.goto(f"https://www.rightmove.co.uk{random.choice(extras)}")
@@ -70,65 +85,52 @@ class RightmoveScraper:
                 await page.wait_for_load_state("networkidle")
                 await asyncio.sleep(random.uniform(1,2))
 
-            await page.goto("https://www.rightmove.co.uk")
-            await asyncio.sleep(random.uniform(2,5))
-            if "captcha" in page.url.lower():
-                raise CaptchaError("Captcha page detected")
-
-            viewport = page.viewport_size
-            for _ in range(random.randint(5,10)):
-                x = random.randint(0, viewport["width"])
-                y = random.randint(0, viewport["height"])
-                await page.mouse.move(x, y, steps=random.randint(5,20))
-                await asyncio.sleep(random.uniform(0.1,0.5))
-
-            scroll_height = await page.evaluate("document.body.scrollHeight")
-            for _ in range(random.randint(2,5)):
-                pos = random.randint(0, scroll_height)
-                await page.evaluate(f"window.scrollTo(0, {pos})")
-                await asyncio.sleep(random.uniform(0.5,1.5))
-
-            await page.evaluate("localStorage.setItem('visit_time', Date.now().toString())")
-
-            # locate search input with multiple fallbacks
-            search_selectors = [
-                'input[id="searchLocation"]',
-                'input[name="searchLocation"]',
-                'input[placeholder*="Enter"]',
-                'input[placeholder*="Location"]',
-                'input[placeholder*="Postcode"]'
-            ]
-            element = None
-            for selector in search_selectors:
-                try:
-                    await page.wait_for_selector(selector, timeout=5000)
-                    element = page.locator(selector).first
-                    break
-                except PlaywrightTimeoutError:
-                    continue
-            if not element:
-                return []
-
+            # Acquire locationIdentifier via autocomplete API
+            identifier = None
             try:
-                await element.click(timeout=3000)
+                resp = await page.request.get(
+                    f"https://www.rightmove.co.uk/api/_autocomplete?"
+                    f"index=search_location&term={area}",
+                    timeout=5000
+                )
+                data = await resp.json()
+                if isinstance(data, list) and data and data[0].get("locationIdentifier"):
+                    identifier = data[0]["locationIdentifier"]
             except:
-                pass
-            await element.fill(area, timeout=5000)
-            await asyncio.sleep(random.uniform(0.5,1.0))
+                identifier = None
 
-            # press enter to select suggestion and submit
-            try:
-                await element.press("Enter")
-            except:
-                await page.keyboard.press("Enter")
+            # Fallback to default if missing
+            if not identifier:
+                identifier = self._default_identifier
+
+            # URL-encode the identifier
+            encoded_identifier = quote(identifier, safe="")
+
+            # Build the search URL using your example parameters
+            price_param = max_price if max_price is not None else ""
+            search_url = (
+                "https://www.rightmove.co.uk/property-for-sale/find.html?"
+                f"sortType=2&viewType=LIST&channel=BUY&index=0"
+                f"&maxPrice={price_param}&radius=0.0"
+                f"&locationIdentifier={encoded_identifier}"
+                f"&tenureTypes=FREEHOLD&transactionType=BUY"
+                f"&displayLocationIdentifier=undefined"
+                f"&mustHave=parking"
+                f"&dontShow=newHome,retirement,sharedOwnership,auction"
+            )
+
+            # Navigate to the pre-filtered results page
+            await page.goto(search_url)
             await page.wait_for_load_state("networkidle")
             await asyncio.sleep(random.uniform(2,4))
 
-            # scroll to load results
-            scroll_height = await page.evaluate("document.body.scrollHeight")
-            await page.evaluate(f"window.scrollTo(0, {random.randint(0, scroll_height)})")
-            await asyncio.sleep(random.uniform(1,2))
+            # Human-like scrolling
+            for _ in range(random.randint(2,5)):
+                scroll_height = await page.evaluate("document.body.scrollHeight")
+                await page.evaluate(f"window.scrollTo(0, {random.randint(0, scroll_height)})")
+                await asyncio.sleep(random.uniform(0.5,1.5))
 
+            # Extract listings
             cards = await page.query_selector_all(".propertyCard")
             results = []
             for card in cards:
@@ -172,11 +174,13 @@ class RightmoveScraper:
                     })
                 except:
                     continue
+
             return results
         finally:
             await page.close()
 
     async def close(self):
+        """Close browser context and Playwright."""
         if self.context:
             await self.context.close()
         if self.playwright:
