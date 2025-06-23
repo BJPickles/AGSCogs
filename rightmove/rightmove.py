@@ -337,12 +337,22 @@ class RightmoveCog(commands.Cog):
         await ctx.send("✅ Manual scrape done.")
 
     async def do_scrape(self, force_refresh: bool = False):
-        url = (
-            "https://www.rightmove.co.uk/property-for-sale/find.html?"
-            # … your full query string here …
-            "&dontShow=newHome%2Cretirement%2CsharedOwnership%2Cauction"
-        )
+        url = "https://www.rightmove.co.uk/…"
         df = RightmoveData(url).get_results
+
+        # ─────── BEGIN DEBUG BLOCK ───────
+        # Send the columns and a few sample rows back into Discord
+        try:
+            cols = df.columns.tolist()
+            sample = df.head(5).to_dict(orient="records")
+            await self.target_channel.send(
+                "DEBUG: RightmoveData returned:\n"
+                f"Columns: `{cols}`\n"
+                f"Sample rows (up to 5):\n```json\n{sample}\n```"
+            )
+        except Exception as e:
+            await self.target_channel.send(f"DEBUG: could not dump df: {e}")
+        # ─────── END DEBUG BLOCK ───────
 
         # safety-net: although from_records guarantees it, double-check
         if "type" not in df.columns:
