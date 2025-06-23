@@ -1,7 +1,6 @@
 import re
 import time
 import datetime
-import asyncio
 from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 
@@ -12,7 +11,6 @@ import requests
 
 import discord
 from discord.ext import tasks
-from discord.ext.commands import BadArgument, TextChannelConverter
 from redbot.core import Config, commands
 
 # ----------------------------
@@ -44,6 +42,7 @@ BANNED_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+
 class RightmoveData:
     """Scrapes Rightmove search results and returns a DataFrame of properties."""
     def __init__(self, url: str, get_floorplans: bool = False):
@@ -56,26 +55,34 @@ class RightmoveData:
     def _request(url: str):
         r = requests.get(
             url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/115.0.0 Safari/537.36"
+                )
+            },
             timeout=10,
         )
         return r.status_code, r.content
 
     def _validate_url(self):
         """Basic sanity check on Rightmove search URL."""
-        template = "{}://www.rightmove.co.uk/{}/find.html?"
+        tem = "{}://www.rightmove.co.uk/{}/find.html?"
         protos = ["http", "https"]
         kinds = ["property-to-rent", "property-for-sale", "new-homes-for-sale"]
-        valid_prefixes = [template.format(p, k) for p in protos for k in kinds]
-        if not any(self._url.startswith(pref) for pref in valid_prefixes) or self._status_code != 200:
+        prefixes = [tem.format(p, k) for p in protos for k in kinds]
+        if not any(self._url.startswith(pref) for pref in prefixes) or self._status_code != 200:
             raise ValueError(f"Invalid Rightmove URL:\n{self._url}")
 
     @property
     def get_results(self) -> pd.DataFrame:
+        """Returns the final scraped DataFrame."""
         return self._results
 
     @property
     def results_count_display(self) -> int:
+        """Number displayed on first page, or 0."""
         tree = html.fromstring(self._first_page)
         nodes = tree.xpath("//span[contains(@class,'searchHeader-resultCount')]/text()")
         if not nodes:
@@ -87,11 +94,13 @@ class RightmoveData:
 
     @property
     def page_count(self) -> int:
+        """Total pages (24 listings per page, max 42)."""
         total = self.results_count_display
         pages = total // 24 + (1 if total % 24 else 0)
         return min(max(pages, 1), 42)
 
     def _parse_date(self, text: str) -> int:
+        """Convert 'Added today' or 'Added on DD/MM/YYYY' to UNIX ts."""
         now = int(time.time())
         if not text:
             return now
@@ -106,63 +115,89 @@ class RightmoveData:
         return now
 
     def _get_page(self, content: bytes, get_floorplans: bool) -> pd.DataFrame:
+        """Scrape a single search-results page into a DataFrame."""
         tree = html.fromstring(content)
         cards = tree.xpath("//div[starts-with(@data-testid,'propertyCard-')]")
         rows = []
         base = "https://www.rightmove.co.uk"
         for c in cards:
+            # price
             pr = c.xpath(
                 ".//a[@data-testid='property-price']//div"
                 "[contains(@class,'PropertyPrice_price__')]/text()"
             )
             price_raw = pr[0].strip() if pr else None
 
+            # address
             ad = c.xpath(".//*[@data-testid='property-address']//address/text()")
             address = ad[0].strip() if ad else None
 
-            tp = c.xpath(".//span[contains(@class,'PropertyInformation_propertyType')]/text()")
+            # type
+            tp = c.xpath(
+                ".//span[contains(@class,'PropertyInformation_propertyType')]/text()"
+            )
             ptype = tp[0].strip() if tp else None
 
-            bd = c.xpath(".//span[contains(@class,'PropertyInformation_bedroomsCount')]/text()")
+            # beds
+            bd = c.xpath(
+                ".//span[contains(@class,'PropertyInformation_bedroomsCount')]/text()"
+            )
             try:
                 beds = int(bd[0]) if bd else None
             except ValueError:
                 beds = None
 
-            ld = c.xpath(".//span[contains(@class,'MarketedBy_joinedText')]/text()") or [None]
-            ud = c.xpath(".//span[contains(@class,'MarketedBy_addedOrReduced')]/text()") or [None]
-            listed_ts  = self._parse_date(ld[0])
-            updated_ts = self._parse_date(ud[0])
+            # listed/updated text
+            ld = c.xpath(
+                ".//span[contains(@class,'MarketedBy_joinedText')]/text()"
+            ) or [None]
+            ud = c.xpath(
+                ".//span[contains(@class,'MarketedBy_addedOrReduced')]/text()"
+            ) or [None]
+            listed_txt  = ld[0]
+            updated_txt = ud[0]
+            listed_ts   = self._parse_date(listed_txt)
+            updated_ts  = self._parse_date(updated_txt)
 
+            # STC?
             stc = bool(c.xpath(
-                ".//span[contains(text(),'STC') or contains(text(),'Subject to contract')]"
+                ".//span[contains(text(),'STC')"
+                " or contains(text(),'Subject to contract')]"
             ))
 
+            # URL
             href = c.xpath(".//a[@data-test='property-details']/@href")
             url = f"{base}{href[0]}" if href else None
 
-            img_elems = c.xpath(".//img[@data-testid='property-img-1']") or []
-            img_url = None
-            if img_elems:
-                tag = img_elems[0]
-                srcset = tag.get("srcset", "")
+            # first image (pick the highest-res from srcset)
+            imgs = c.xpath(".//img[@data-testid='property-img-1']")
+            if imgs:
+                img_el = imgs[0]
+                srcset = img_el.get("srcset")
                 if srcset:
-                    candidates = [seg.strip().split(" ")[0] for seg in srcset.split(",")]
-                    img_url = candidates[-1]
+                    try:
+                        candidates = [piece.strip().split(" ")[0] for piece in srcset.split(",")]
+                        img_url = candidates[-1]
+                    except Exception:
+                        img_url = img_el.get("src")
                 else:
-                    img_url = tag.get("src")
-            if img_url and img_url.startswith("//"):
-                img_url = "https:" + img_url
+                    img_url = img_el.get("src")
+            else:
+                img_url = None
 
+            # agent
             an = c.xpath(
-                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]//img/@alt"
+                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]"
+                "//img/@alt"
             )
             agent = an[0].replace(" Estate Agent Logo", "").strip() if an else None
             au = c.xpath(
-                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]//a/@href"
+                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]"
+                "//a/@href"
             )
             agent_url = f"{base}{au[0]}" if au else None
 
+            # property ID
             pid = None
             if url:
                 m = re.search(r"/properties/(\d+)", url)
@@ -195,28 +230,29 @@ class RightmoveData:
         return df
 
     def _get_results(self, get_floorplans: bool) -> pd.DataFrame:
+        """Aggregate all pages into one DataFrame."""
         df = self._get_page(self._first_page, get_floorplans)
         for p in range(1, self.page_count):
             u = f"{self._url}&index={p*24}"
-            sc, content = self._request(u)
+            sc,ct = self._request(u)
             if sc != 200:
                 break
-            tmp = self._get_page(content, get_floorplans)
+            tmp = self._get_page(ct, get_floorplans)
             df = pd.concat([df, tmp], ignore_index=True)
         return df
 
 
 class RightmoveCog(commands.Cog):
-    """Rightmove scraper with reorder, rename, big images, listing link, cooldown & override."""
+    """A cog that scrapes Rightmove daily at 07:00 London with full caching,
+       multi-category channel rollover, STC/vanished detection and embeds."""
 
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=1234567890)
+        # store { property_id: {channel_id, price, listed_ts, updated_ts, is_stc, active} }
         self.config.register_global(properties={})
         self.scrape_loop = None
         self.target_channel = None
-        self._rebuild_lock = asyncio.Lock()
-        self._last_test = 0.0
 
     def cog_unload(self):
         if self.scrape_loop and self.scrape_loop.is_running():
@@ -225,64 +261,50 @@ class RightmoveCog(commands.Cog):
     @commands.is_owner()
     @commands.group(name="rm", invoke_without_command=True)
     async def rm(self, ctx):
-        """Rightmove commands: .rm start | stop | test"""
+        """Rightmove commands: `.rm start`, `.rm stop`, `.rm test`"""
         await ctx.send_help(ctx.command)
 
     @rm.command(name="start")
     async def rm_start(self, ctx, channel: discord.TextChannel = None):
+        """
+        Schedule daily scrape at 07:00 Europe/London.
+        Does NOT run immediately; use `.rm test` to run it now.
+        """
         if self.scrape_loop and self.scrape_loop.is_running():
             return await ctx.send("❌ Already scheduled.")
         self.target_channel = channel or ctx.channel
+
+        # set up daily loop
         self.scrape_loop = tasks.loop(time=SCRAPE_TIME)(self.do_scrape)
         self.scrape_loop.start()
-        await ctx.send("✅ Scheduled daily scrape at 07:00 Europe/London.")
+
+        await ctx.send(
+            f"✅ Scheduled daily scrape at 07:00 Europe/London. "
+            f"Channels will live in `{CATEGORY_PREFIX} 1`, `{CATEGORY_PREFIX} 2`, etc."
+        )
 
     @rm.command(name="stop")
     async def rm_stop(self, ctx):
+        """Unschedule the daily scrape."""
         if not self.scrape_loop or not self.scrape_loop.is_running():
             return await ctx.send("❌ No scrape scheduled.")
         self.scrape_loop.cancel()
         await ctx.send("✅ Scrape unscheduled.")
 
     @rm.command(name="test")
-    async def rm_test(self, ctx, *args):
+    async def rm_test(self, ctx, channel: discord.TextChannel = None):
         """
-        Run a manual scrape immediately.
-        Optional: .rm test [#channel] [override]
+        Run one manual scrape immediately.
+        Optionally pass a channel to override where embeds go.
         """
-        override = False
-        channel = None
-        for arg in args:
-            if arg.lower() == "override":
-                override = True
-            else:
-                try:
-                    channel = await TextChannelConverter().convert(ctx, arg)
-                except BadArgument:
-                    continue
-
+        # Ensure we have a target channel
         self.target_channel = channel or self.target_channel or ctx.channel
-
-        if self._rebuild_lock.locked() and not override:
-            return await ctx.send(
-                "❌ A rebuild is already in progress. Use `.rm test override` to force."
-            )
-
-        now = time.time()
-        if now - self._last_test < 300 and not override:
-            return await ctx.send(
-                f"❌ Please wait {int(300 - (now - self._last_test))}s "
-                "or use `.rm test override`."
-            )
-        self._last_test = now
-
         await ctx.send("🔄 Running manual scrape…")
-        async with self._rebuild_lock:
-            await self.do_scrape(force_update=override)
+        await self.do_scrape()
         await ctx.send("✅ Manual scrape done.")
 
-    async def do_scrape(self, force_update: bool = False):
-        # Full, un-truncated Rightmove URL
+    async def do_scrape(self):
+        # Full URL:
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
             "sortType=1&viewType=LIST&channel=BUY"
@@ -299,18 +321,24 @@ class RightmoveCog(commands.Cog):
             "&maxDaysSinceAdded=14"
         )
         df = RightmoveData(url).get_results
+        # filter out banned types
         df = df[~df["type"].str.contains(BANNED_PATTERN, na=False)]
 
         cache = await self.config.properties()
         new_props = {r["id"]: r for _, r in df.iterrows()}
-        old_ids, new_ids = set(cache), set(new_props)
+        old_ids   = set(cache)
+        new_ids   = set(new_props)
+
         guild = self.target_channel.guild
 
-        # find/create category under CATEGORY_PREFIX
-        cats = [c for c in guild.categories if c.name.startswith(CATEGORY_PREFIX)]
-        cats.sort(key=lambda c: int(c.name.split()[-1]) if c.name.split()[-1].isdigit() else 1)
+        # find/create category under CATEGORY_PREFIX with <MAX_PER_CATEGORY> prop- channels
+        existing = [
+            c for c in guild.categories
+            if c.name.startswith(CATEGORY_PREFIX)
+        ]
+        existing.sort(key=lambda c: int(c.name.split()[-1]) if c.name.split()[-1].isdigit() else 1)
         target_cat = None
-        for cat in cats:
+        for cat in existing:
             cnt = sum(
                 1 for ch in cat.channels
                 if isinstance(ch, discord.TextChannel) and ch.name.startswith("prop-")
@@ -319,23 +347,18 @@ class RightmoveCog(commands.Cog):
                 target_cat = cat
                 break
         if not target_cat:
-            idx = int(cats[-1].name.split()[-1]) + 1 if cats else 1
+            idx = int(existing[-1].name.split()[-1]) + 1 if existing else 1
             target_cat = await guild.create_category(f"{CATEGORY_PREFIX} {idx}")
 
-        # new listings, price changes, STC
+        # handle new & updates
         for pid, r in new_props.items():
-            is_new = pid not in cache
-            old = cache.get(pid, {})
+            is_new        = pid not in cache
+            old           = cache.get(pid, {})
             price_changed = (not is_new) and (r["price"] != old.get("price"))
-            stc_changed = r["is_stc"] and not old.get("is_stc", False)
-
-            # force_update => treat as price_changed
-            if force_update and not is_new:
-                price_changed = True
+            stc_changed   = r["is_stc"] and not old.get("is_stc", False)
 
             if is_new:
-                name = f"prop-{int(r['price'])}-{pid}"
-                ch = await guild.create_text_channel(name, category=target_cat)
+                ch = await guild.create_text_channel(f"prop-{pid}", category=target_cat)
                 cache[pid] = {
                     "channel_id": ch.id,
                     "price": r["price"],
@@ -344,7 +367,7 @@ class RightmoveCog(commands.Cog):
                     "is_stc": r["is_stc"],
                     "active": True,
                 }
-                await self.post_embed(ch, r, "new")
+                await self.post_embed(ch, r, event="new")
                 continue
 
             ch = guild.get_channel(old["channel_id"])
@@ -352,55 +375,27 @@ class RightmoveCog(commands.Cog):
                 continue
 
             if stc_changed:
-                cache[pid]["is_stc"] = True
+                cache[pid]["is_stc"]     = True
                 cache[pid]["updated_ts"] = r["updated_ts"]
-                await self.post_embed(ch, r, "stc")
+                await self.post_embed(ch, r, event="stc")
                 continue
 
             if price_changed:
-                new_name = f"prop-{int(r['price'])}-{pid}"
-                await ch.edit(name=new_name)
-                cache[pid]["price"] = r["price"]
+                cache[pid]["price"]      = r["price"]
                 cache[pid]["updated_ts"] = r["updated_ts"]
-                await self.post_embed(ch, r, "price_update")
+                await self.post_embed(ch, r, event="price_update")
                 continue
 
-        # vanished
+        # handle vanished
         for pid in old_ids - new_ids:
             old = cache[pid]
-            if old.get("active", False):
+            if old.get("active", True):
                 ch = guild.get_channel(old["channel_id"])
                 if ch:
                     cache[pid]["active"] = False
-                    await self.post_embed(ch, None, "vanished")
+                    await self.post_embed(ch, None, event="vanished")
 
         await self.config.properties.set(cache)
-        await self._reorder_channels()
-
-    async def _reorder_channels(self):
-        guild = self.target_channel.guild
-        cache = await self.config.properties()
-        for cat in guild.categories:
-            if not cat.name.startswith(CATEGORY_PREFIX):
-                continue
-            ordering = []
-            for ch in cat.channels:
-                if not isinstance(ch, discord.TextChannel) or not ch.name.startswith("prop-"):
-                    continue
-                pid = ch.name.rsplit("-", 1)[-1]
-                prop = cache.get(pid, {})
-                price = prop["price"] if prop.get("active", False) else float("inf")
-                ordering.append((price, ch.id))
-            ordering.sort(key=lambda x: x[0])
-            positions = [
-                {"id": cid, "position": idx, "parent_id": cat.id}
-                for idx, (_, cid) in enumerate(ordering)
-            ]
-            if positions:
-                try:
-                    await guild.edit_channel_positions(positions=positions)
-                except Exception:
-                    pass
 
     async def post_embed(self, ch: discord.TextChannel, r, event: str):
         emojis = {
@@ -411,6 +406,7 @@ class RightmoveCog(commands.Cog):
         }
         emoji, pre, color = emojis[event]
 
+        # r is a pandas Series for new/update/STC, or None for vanished
         if r is not None:
             price = r["price"]
             if color is None:
@@ -430,40 +426,68 @@ class RightmoveCog(commands.Cog):
             )
             embed = discord.Embed(title=title, color=color, description=desc)
 
-            # big image
-            if r.get("image_url"):
+            if r["image_url"]:
                 embed.set_image(url=r["image_url"])
 
-            # bedrooms as integer
-            beds = r.get("number_bedrooms")
-            beds_str = str(int(beds)) if beds is not None else "N/A"
-            embed.add_field(name="🛏 Bedrooms", value=beds_str, inline=True)
-
             embed.add_field(name="💷 Price", value=f"£{int(price):,}", inline=True)
+            embed.add_field(name="🛏 Bedrooms", value=str(r["number_bedrooms"]), inline=True)
             embed.add_field(name="🏠 Type", value=r["type"], inline=True)
-
-            # listing link
-            if r.get("url"):
+            if r["agent"] and r["agent_url"]:
                 embed.add_field(
-                    name="🔗 Listing",
-                    value=f"[View on Rightmove]({r['url']})",
-                    inline=False
-                )
-
-            # agent
-            if r.get("agent") and r.get("agent_url"):
-                embed.add_field(
-                    name="🏢 Agent",
+                    name="🔗 Agent",
                     value=f"[{r['agent']}]({r['agent_url']})",
-                    inline=True
+                    inline=True,
                 )
-
             await ch.send(embed=embed)
+
+            # reorder channels in this category by ascending price
+            if event in ("new", "price_update") and ch.category:
+                await self.reorder_category(ch.category)
+
         else:
+            # vanished
             emoji, pre, color = emojis["vanished"]
             embed = discord.Embed(
                 title=f"{emoji} {pre}",
                 color=color,
-                description="This property has vanished from the search."
+                description="This property has vanished from the search.",
             )
             await ch.send(embed=embed)
+
+    async def reorder_category(self, category: discord.CategoryChannel):
+        """Sort all active prop-* channels in this category by ascending price."""
+        guild = category.guild
+        cache = await self.config.properties()
+
+        # collect (price, channel) pairs
+        items = []
+        for pid, data in cache.items():
+            if not data.get("active", False):
+                continue
+            ch_id = data.get("channel_id")
+            price = data.get("price")
+            if ch_id is None or price is None:
+                continue
+            ch = guild.get_channel(ch_id)
+            if ch and ch.category_id == category.id:
+                items.append((price, ch))
+
+        # sort by price
+        items.sort(key=lambda x: x[0])
+
+        if not items:
+            return
+
+        positions = [{"id": ch.id, "parent_id": category.id, "position": idx}
+                     for idx, (_, ch) in enumerate(items)]
+
+        # apply batch edit if available
+        try:
+            await guild.edit_channel_positions(positions=positions)
+        except (AttributeError, TypeError):
+            # fallback individual edits
+            for idx, (_, ch) in enumerate(items):
+                try:
+                    await ch.edit(position=idx)
+                except:
+                    pass
