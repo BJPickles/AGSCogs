@@ -7,7 +7,7 @@ import discord
 from discord.ext import tasks
 from redbot.core import commands, Config
 
-from urllib.parse import quote
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse, quote, unquote
 
 from .scraper import RightmoveScraper, CaptchaError
 from .filter_utils import filter_listings
@@ -224,19 +224,27 @@ class RightmoveAlert(commands.Cog):
     @commands.guild_only()
     async def set_url(self, ctx, *, url: str):
         """
-        Set the exact Rightmove search URL to scrape.
-        Auto-encodes any raw " characters into %22 so Playwright can load it.
+        Set your Rightmove URL, auto-fixing any double-encoded locationIdentifier.
         """
-        if "locationIdentifier=" in url:
-            pre, rest = url.split("locationIdentifier=", 1)
-            if "&" in rest:
-                ident, post = rest.split("&", 1)
-                ident_enc = quote(ident, safe="")
-                safe_url = f"{pre}locationIdentifier={ident_enc}&{post}"
+        # parse the URL into components
+        parts = urlparse(url)
+        # turn query into a list of (k,v)
+        qsl = parse_qsl(parts.query, keep_blank_values=True)
+        new_qsl = []
+        for k, v in qsl:
+            if k == "locationIdentifier":
+                # decode any stray % escapes twice
+                decoded = unquote(unquote(v))
+                # encode it exactly once (so ^ -> %5E, " -> %22, etc.)
+                fixed = quote(decoded, safe="")
+                new_qsl.append((k, fixed))
             else:
-                safe_url = f"{pre}locationIdentifier={quote(rest, safe='')}"
-        else:
-            safe_url = url.replace('"', '%22')
+                new_qsl.append((k, v))
+        # rebuild the query string
+        new_query = urlencode(new_qsl)
+        # reconstruct a full URL
+        safe_url = urlunparse(parts._replace(query=new_query))
+        # save it
         await self.config.guild(ctx.guild).search_url.set(safe_url)
         await ctx.send(f"🔗 Search URL set to:\n`{safe_url}`")
 
