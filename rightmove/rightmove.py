@@ -41,21 +41,13 @@ BANNED_PROPERTY_TYPES = {
 
 # substring‐based banned descriptors (lowercase)
 BANNED_TYPE_SUBSTRINGS = [
-    # leasehold variants
     "leasehold", "lease hold", "lease-hold",
-    # shared ownership
     "sharedownership", "shared ownership", "shared-ownership",
-    # over 50s
     "over 50", "over50", "over-50", "over 50s", "over50s", "over-50s",
-    # holiday home
     "holiday home", "holiday-home", "holidayhome", "holiday homes", "holiday-homes", "holidayhomes",
-    # park home
     "park home", "park-home", "parkhome", "park homes", "park-homes", "parkhomes",
-    # mobile home
     "mobile home", "mobile-home", "mobilehome",
-    # caravan
     "caravan", "caravans",
-    # not specified
     "not specified", "not-specified", "notspecified",
 ]
 
@@ -64,7 +56,7 @@ class RightmoveData:
     def __init__(self, url: str, get_floorplans: bool = False):
         self._status_code, self._first_page = self._request(url)
         self._url = url
-        # skip strict validation for long encoded URLs
+        # strict URL validation disabled for complex encoded URL
         # self._validate_url()
         self._results = self._get_results(get_floorplans=get_floorplans)
 
@@ -232,6 +224,8 @@ class RightmoveData:
             })
 
         df = pd.DataFrame(rows)
+        # DEBUG: print columns & row count before dropna
+        print("DEBUG raw df columns:", df.columns.tolist(), "rows:", len(df))
         df["price"] = (
             df["price"]
             .replace(r"\D+", "", regex=True)
@@ -239,13 +233,15 @@ class RightmoveData:
             .astype(float)
         )
         df = df.dropna(subset=["id", "price", "address", "type"])
+        # DEBUG: print columns & row count after dropna
+        print("DEBUG post-dropna df columns:", df.columns.tolist(), "rows:", len(df))
         df.reset_index(drop=True, inplace=True)
         return df
 
     def _get_results(self, get_floorplans: bool) -> pd.DataFrame:
         df = self._get_page(self._first_page, get_floorplans)
         for p in range(1, self.page_count):
-            u,idx = f"{self._url}&index={p*24}", p
+            u   = f"{self._url}&index={p*24}"
             sc, ct = self._request(u)
             if sc != 200:
                 break
