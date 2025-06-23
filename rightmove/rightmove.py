@@ -476,7 +476,8 @@ class RightmoveCog(commands.Cog):
             price = r["price"]
             if color is None:
                 if abs(price - TARGET_PRICE) <= IDEAL_DELTA:
-                    color = discord.Color.light_blue()
+                    # replaced unsupported light_blue() with blue()
+                    color = discord.Color.blue()
                 elif price <= 170_000:
                     color = discord.Color.green()
                 elif price <= 220_000:
