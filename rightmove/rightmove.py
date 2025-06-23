@@ -27,25 +27,7 @@ SCRAPE_TIME          = dt_time(hour=7, minute=0, tzinfo=LONDON)
 TARGET_PRICE         = 250_000
 IDEAL_DELTA          =   3_000
 
-# comprehensive banned‐terms regex (still applied to scraped 'type')
-BANNED_PATTERN = re.compile(
-    r"\b(?:"
-      r"lease[\s-]?hold"
-    r"|shared[\s-]?ownership"
-    r"|over[\s-]?50(?:s)?"
-    r"|holiday[\s-]?home(?:s)?"
-    r"|park[\s-]?home(?:s)?"
-    r"|mobile[\s-]?home(?:s)?"
-    r"|caravan(?:s)?"
-    r"|garage(?:s)?"
-    r"|land(?:s)?"
-    r"|studio(?:s)?"
-    r"|not[\s-]?specified"
-    r")\b",
-    re.IGNORECASE,
-)
-
-# exact-match banned property types (lowercase)
+# exact‐match banned property types (lowercase)
 BANNED_PROPERTY_TYPES = {
     "studio",
     "land",
@@ -54,15 +36,31 @@ BANNED_PROPERTY_TYPES = {
     "caravan",
     "garages",
     "parking",
+    "garage",
+    "garages",
 }
 
+# substring‐based banned descriptors (lowercase)
+BANNED_TYPE_SUBSTRINGS = [
+    "leasehold", "lease hold", "lease-hold",
+    "shared ownership", "shared-ownership",
+    "over 50", "over50", "over-50", "over 50s", "over50s", "over-50s",
+    "holiday home", "holiday-home", "holiday homes", "holiday-homes",
+    "park home", "park-home", "park homes", "park-homes",
+    "mobile home", "mobile-home",
+    "caravan", "caravans",
+    "land",
+    "studio",
+    "not specified", "not-specified", "notspecified",
+]
 
 class RightmoveData:
     """Scrapes Rightmove search results and returns a DataFrame of properties."""
     def __init__(self, url: str, get_floorplans: bool = False):
         self._status_code, self._first_page = self._request(url)
         self._url = url
-        # self._validate_url()   # disabled: our URL is long/complex
+        # strict URL validation disabled for long, encoded URLs
+        # self._validate_url()
         self._results = self._get_results(get_floorplans=get_floorplans)
 
     @staticmethod
@@ -81,22 +79,19 @@ class RightmoveData:
         return r.status_code, r.content
 
     def _validate_url(self):
-        """Basic sanity check on Rightmove search URL."""
-        tem    = "{}://www.rightmove.co.uk/{}/find.html?"
+        tem = "{}://www.rightmove.co.uk/{}/find.html?"
         protos = ["http", "https"]
-        kinds  = ["property-to-rent", "property-for-sale", "new-homes-for-sale"]
+        kinds = ["property-to-rent", "property-for-sale", "new-homes-for-sale"]
         prefixes = [tem.format(p, k) for p in protos for k in kinds]
         if not any(self._url.startswith(pref) for pref in prefixes) or self._status_code != 200:
             raise ValueError(f"Invalid Rightmove URL:\n{self._url}")
 
     @property
     def get_results(self) -> pd.DataFrame:
-        """Returns the final scraped DataFrame."""
         return self._results
 
     @property
     def results_count_display(self) -> int:
-        """Number displayed on first page, or 0."""
         tree = html.fromstring(self._first_page)
         nodes = tree.xpath("//span[contains(@class,'searchHeader-resultCount')]/text()")
         if not nodes:
@@ -108,13 +103,11 @@ class RightmoveData:
 
     @property
     def page_count(self) -> int:
-        """Total pages (24 listings per page, max 42)."""
         total = self.results_count_display
         pages = total // 24 + (1 if total % 24 else 0)
         return min(max(pages, 1), 42)
 
     def _parse_date(self, text: str) -> int:
-        """Convert 'Added today' or 'Added on DD/MM/YYYY' to UNIX ts."""
         now = int(time.time())
         if not text:
             return now
@@ -129,7 +122,6 @@ class RightmoveData:
         return now
 
     def _get_page(self, content: bytes, get_floorplans: bool) -> pd.DataFrame:
-        """Scrape a single search-results page into a DataFrame."""
         tree  = html.fromstring(content)
         cards = tree.xpath("//div[starts-with(@data-testid,'propertyCard-')]")
         rows  = []
@@ -201,13 +193,11 @@ class RightmoveData:
 
             # agent
             an = c.xpath(
-                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]"
-                "//img/@alt"
+                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]//img/@alt"
             )
             agent = an[0].replace(" Estate Agent Logo", "").strip() if an else None
             au = c.xpath(
-                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]"
-                "//a/@href"
+                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]//a/@href"
             )
             agent_url = f"{base}{au[0]}" if au else None
 
@@ -244,15 +234,14 @@ class RightmoveData:
         return df
 
     def _get_results(self, get_floorplans: bool) -> pd.DataFrame:
-        """Aggregate all pages into one DataFrame."""
         df = self._get_page(self._first_page, get_floorplans)
         for p in range(1, self.page_count):
-            u = f"{self._url}&index={p*24}"
+            u   = f"{self._url}&index={p*24}"
             sc, ct = self._request(u)
             if sc != 200:
                 break
             tmp = self._get_page(ct, get_floorplans)
-            df = pd.concat([df, tmp], ignore_index=True)
+            df  = pd.concat([df, tmp], ignore_index=True)
         return df
 
 
@@ -352,9 +341,11 @@ class RightmoveCog(commands.Cog):
         )
         df = RightmoveData(url).get_results
 
-        # 1) filter via your regex
-        df = df[~df["type"].str.contains(BANNED_PATTERN, na=False)]
-        # 2) filter exact banned types
+        # 1) filter out banned type substrings
+        df = df[~df["type"].str.lower().apply(
+            lambda t: any(sub in t for sub in BANNED_TYPE_SUBSTRINGS)
+        )]
+        # 2) filter out exact property types
         df = df[~df["type"].str.lower().isin(BANNED_PROPERTY_TYPES)]
 
         cache     = await self.config.properties()
@@ -415,7 +406,7 @@ class RightmoveCog(commands.Cog):
 
             if price_changed:
                 cache[pid]["price"]      = r["price"]
-                cache[pid]["updated_ts"] = r["updated_ts"]
+                cache[pid]["updated_ts"]= r["updated_ts"]
                 await self._send_or_edit(ch, pid, r, event="price_update")
                 continue
 
@@ -468,7 +459,6 @@ class RightmoveCog(commands.Cog):
                 else:
                     color = discord.Color.red()
 
-            # for refresh, skip emoji/prefix
             if event == "refresh":
                 title = r["address"]
             else:
@@ -542,8 +532,8 @@ class RightmoveCog(commands.Cog):
                     continue
                 if not ch.name.startswith("prop-"):
                     continue
-                pid  = ch.name.split("-", 1)[1]
-                prop = cache.get(pid, {})
+                pid   = ch.name.split("-", 1)[1]
+                prop  = cache.get(pid, {})
                 price = prop["price"] if prop.get("active", False) else float("inf")
                 items.append((price, ch.id))
             items.sort(key=lambda x: x[0])
