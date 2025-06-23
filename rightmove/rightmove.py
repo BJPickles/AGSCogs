@@ -82,7 +82,7 @@ class RightmoveData:
     @property
     def results_count_display(self) -> int:
         tree = html.fromstring(self._first_page)
-        nodes = tree.xpath("//span[contains(@class,'searchHeader-resultCount')]/text()")
+        nodes = tree.xpath("//span[@data-testid='search-header-result-count']/text()")
         if not nodes:
             return 0
         try:
@@ -237,14 +237,20 @@ class RightmoveData:
         return df
 
     def _get_results(self, get_floorplans: bool) -> pd.DataFrame:
+        # Always fetch page 1 first
         df = self._get_page(self._first_page, get_floorplans)
-        for p in range(1, self.page_count):
-            u   = f"{self._url}&index={p*24}"
+        page = 1
+        while True:
+            # build URL for the next page
+            u = f"{self._url}&index={page * 24}"
             sc, ct = self._request(u)
             if sc != 200:
                 break
             tmp = self._get_page(ct, get_floorplans)
-            df  = pd.concat([df, tmp], ignore_index=True)
+            if tmp.empty:
+                break
+            df = pd.concat([df, tmp], ignore_index=True)
+            page += 1
         return df
 
 
@@ -341,11 +347,6 @@ class RightmoveCog(commands.Cog):
             return await self.target_channel.send(f"❌ HTTP {data._status_code}, aborting.")
         df = data.get_results
 
-        print("🔍 total matches according to page:", data.results_count_display)
-        print("🔍 pages to fetch:", data.page_count)
-        print("🔍 raw cards on page 1:", len(self._get_page(data._first_page, get_floorplans=False)))
-        print("🔍 types on page 1:", set(self._get_page(data._first_page, get_floorplans=False)["type"]))
-
         # Bail out if nothing scraped
         if df.empty:
             return await self.target_channel.send(
@@ -429,7 +430,7 @@ class RightmoveCog(commands.Cog):
                     cache[pid]["active"] = False
                     await self._send_or_edit(ch, pid, None, event="vanished", cache=cache)
 
-        # Persist cache modifications (new, updates, vanished)
+        # Persist cache modifications
         await self.config.properties.set(cache)
 
         # Force‐refresh
@@ -453,7 +454,6 @@ class RightmoveCog(commands.Cog):
         event: str,
         cache: dict = None,
     ):
-        # Use provided in‐memory cache or fall back to stored config
         local_cache = cache if cache is not None else await self.config.properties()
         data  = local_cache[pid]
         emojis = {
@@ -466,7 +466,6 @@ class RightmoveCog(commands.Cog):
         emoji, pre, color = emojis[event]
 
         if r is not None:
-            # Choose embed color
             price = r["price"]
             if color is None:
                 if abs(price - TARGET_PRICE) <= IDEAL_DELTA:
@@ -507,7 +506,6 @@ class RightmoveCog(commands.Cog):
                     inline=False,
                 )
         else:
-            # vanished embed
             emoji2, pre2, color2 = emojis["vanished"]
             embed = discord.Embed(
                 title=f"{emoji2} {pre2}",
@@ -523,7 +521,6 @@ class RightmoveCog(commands.Cog):
             else:
                 msg = await ch.send(embed=embed)
                 data["message_id"] = msg.id
-                # persist the new message_id
                 await self.config.properties.set(local_cache)
         except (discord.NotFound, discord.HTTPException):
             msg = await ch.send(embed=embed)
