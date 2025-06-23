@@ -1,6 +1,7 @@
 import re
 import time
 import datetime
+import asyncio
 from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 
@@ -11,6 +12,7 @@ import requests
 
 import discord
 from discord.ext import tasks
+from discord.ext.commands import TextChannelConverter, BadArgument
 from redbot.core import Config, commands
 
 # ----------------------------
@@ -169,9 +171,21 @@ class RightmoveData:
             href = c.xpath(".//a[@data-test='property-details']/@href")
             url = f"{base}{href[0]}" if href else None
 
-            # first image
-            img = c.xpath(".//img[@data-testid='property-img-1']/@src") or [None]
-            img_url = img[0]
+            # first image: pick largest from srcset if available
+            img_elems = c.xpath(".//img[@data-testid='property-img-1']") or []
+            if img_elems:
+                img_tag = img_elems[0]
+                srcset = img_tag.get("srcset", "")
+                if srcset:
+                    candidates = [seg.strip().split(" ")[0] for seg in srcset.split(",")]
+                    img_url = candidates[-1]
+                else:
+                    img_url = img_tag.get("src") or None
+            else:
+                img_url = None
+            # ensure full URL
+            if img_url and img_url.startswith("//"):
+                img_url = "https:" + img_url
 
             # agent
             an = c.xpath(
@@ -241,6 +255,9 @@ class RightmoveCog(commands.Cog):
         self.config.register_global(properties={})
         self.scrape_loop = None
         self.target_channel = None
+        # for rebuild / cooldown
+        self._rebuild_lock = asyncio.Lock()
+        self._last_test = 0.0
 
     def cog_unload(self):
         if self.scrape_loop and self.scrape_loop.is_running():
@@ -280,15 +297,46 @@ class RightmoveCog(commands.Cog):
         await ctx.send("✅ Scrape unscheduled.")
 
     @rm.command(name="test")
-    async def rm_test(self, ctx, channel: discord.TextChannel = None):
+    async def rm_test(self, ctx, *args):
         """
         Run one manual scrape immediately.
-        Optionally pass a channel to override where embeds go.
+        Optionally pass a channel and/or 'override':
+          .rm test #channel override
         """
-        # Ensure we have a target channel
+        # parse override + optional channel
+        override = False
+        channel = None
+        for arg in args:
+            if arg.lower() == "override":
+                override = True
+            else:
+                try:
+                    channel = await TextChannelConverter().convert(ctx, arg)
+                except BadArgument:
+                    continue
+
         self.target_channel = channel or self.target_channel or ctx.channel
+
+        # block if a rebuild is in progress
+        if self._rebuild_lock.locked() and not override:
+            return await ctx.send(
+                "❌ A rebuild is already in progress. "
+                "Please wait or use `.rm test override` to force."
+            )
+
+        # 5 minute cooldown
+        now = time.time()
+        if (now - self._last_test) < 300 and not override:
+            rem = int(300 - (now - self._last_test))
+            return await ctx.send(
+                f"❌ You must wait {rem}s before running `.rm test` again, "
+                "or use `.rm test override`."
+            )
+        self._last_test = now
+
         await ctx.send("🔄 Running manual scrape…")
-        await self.do_scrape()
+        async with self._rebuild_lock:
+            await self.do_scrape()
         await ctx.send("✅ Manual scrape done.")
 
     async def do_scrape(self):
@@ -296,7 +344,7 @@ class RightmoveCog(commands.Cog):
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
             "sortType=1&viewType=LIST&channel=BUY"
-            "&maxPrice=275000&radius=0.0"
+            "&maxPrice=250000&radius=0.0"
             "&locationIdentifier=USERDEFINEDAREA%5E%7B"
             "%22polylines%22%3A%22sh%7CtHhu%7BE%7D%7CDr_Nf%7B"
             "AnjZxvLz%7Df%40reAllgA%7Bab%40fg%60%40kyu%40s_"
@@ -384,6 +432,36 @@ class RightmoveCog(commands.Cog):
                     await self.post_embed(ch, None, event="vanished")
 
         await self.config.properties.set(cache)
+        # finally, reorder every category
+        await self._reorder_channels()
+
+    async def _reorder_channels(self):
+        guild = self.target_channel.guild
+        cache = await self.config.properties()
+        for cat in guild.categories:
+            if not cat.name.startswith(CATEGORY_PREFIX):
+                continue
+            # gather (price, channel_id)
+            ordering = []
+            for ch in cat.channels:
+                if not isinstance(ch, discord.TextChannel):
+                    continue
+                if not ch.name.startswith("prop-"):
+                    continue
+                pid = ch.name.split("-", 1)[1]
+                prop = cache.get(pid, {})
+                price = prop["price"] if prop.get("active", False) else float("inf")
+                ordering.append((price, ch.id))
+            ordering.sort(key=lambda x: x[0])
+            positions = [
+                {"id": cid, "position": idx, "parent_id": cat.id}
+                for idx, (_, cid) in enumerate(ordering)
+            ]
+            if positions:
+                try:
+                    await guild.edit_channel_positions(positions=positions)
+                except Exception:
+                    pass
 
     async def post_embed(self, ch: discord.TextChannel, r, event: str):
         emojis = {
@@ -394,7 +472,6 @@ class RightmoveCog(commands.Cog):
         }
         emoji, pre, color = emojis[event]
 
-        # Only check for None; pandas.Series cannot be truth-tested directly
         if r is not None:
             price = r["price"]
             if color is None:
@@ -423,7 +500,6 @@ class RightmoveCog(commands.Cog):
                 )
             await ch.send(embed=embed)
         else:
-            # vanished
             emoji, pre, color = emojis["vanished"]
             embed = discord.Embed(
                 title=f"{emoji} {pre}",
