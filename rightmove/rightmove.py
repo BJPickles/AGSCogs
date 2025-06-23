@@ -349,11 +349,11 @@ class RightmoveCog(commands.Cog):
             )
 
         # Now safe to filter on 'type'
-        df = df[df["type"].notna()]
-        df = df[~df["type"].str.lower().apply(
-            lambda t: any(sub in t for sub in BANNED_TYPE_SUBSTRINGS)
-        )]
-        df = df[~df["type"].str.lower().isin(BANNED_PROPERTY_TYPES)]
+        # df = df[df["type"].notna()]
+        # df = df[~df["type"].str.lower().apply(
+        #     lambda t: any(sub in t for sub in BANNED_TYPE_SUBSTRINGS)
+        # )]
+        # df = df[~df["type"].str.lower().isin(BANNED_PROPERTY_TYPES)]
 
         # Load cache
         cache     = await self.config.properties()
