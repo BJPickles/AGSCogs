@@ -56,7 +56,7 @@ class RightmoveData:
     def __init__(self, url: str, get_floorplans: bool = False):
         self._status_code, self._first_page = self._request(url)
         self._url = url
-        # strict validation disabled for long encoded URL
+        # strict URL validation disabled for long encoded URL
         # self._validate_url()
         self._results = self._get_results(get_floorplans=get_floorplans)
 
@@ -224,25 +224,21 @@ class RightmoveData:
             })
 
         df = pd.DataFrame(rows)
-        # DEBUG: inspect before drop
-        print("DEBUG raw df columns:", df.columns.tolist(), "rows:", len(df))
+        # drop only on id, price, address – preserve 'type' even if None
         df["price"] = (
             df["price"]
             .replace(r"\D+", "", regex=True)
             .replace("", np.nan)
             .astype(float)
         )
-        # only drop where id / price / address are missing, keep 'type' column intact
         df = df.dropna(subset=["id", "price", "address"])
-        # DEBUG: inspect after drop
-        print("DEBUG post-dropna df columns:", df.columns.tolist(), "rows:", len(df))
         df.reset_index(drop=True, inplace=True)
         return df
 
     def _get_results(self, get_floorplans: bool) -> pd.DataFrame:
         df = self._get_page(self._first_page, get_floorplans)
         for p in range(1, self.page_count):
-            u = f"{self._url}&index={p*24}"
+            u   = f"{self._url}&index={p*24}"
             sc, ct = self._request(u)
             if sc != 200:
                 break
@@ -347,14 +343,19 @@ class RightmoveCog(commands.Cog):
         )
         df = RightmoveData(url).get_results
 
-        # drop any that failed to get a type
+        # ensure 'type' column exists
+        if "type" not in df.columns:
+            df["type"] = np.nan
+
+        # drop listings with no type
         df = df[df["type"].notna()]
 
-        # 1) filter out banned type substrings
+        # filter out banned substrings in type
         df = df[~df["type"].str.lower().apply(
             lambda t: any(sub in t for sub in BANNED_TYPE_SUBSTRINGS)
         )]
-        # 2) filter out exact property types
+
+        # filter out exact banned property types
         df = df[~df["type"].str.lower().isin(BANNED_PROPERTY_TYPES)]
 
         cache     = await self.config.properties()
