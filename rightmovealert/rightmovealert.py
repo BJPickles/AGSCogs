@@ -15,7 +15,7 @@ from .utils import seconds_until_next_scrape, filter_listings, now_in_windows
 logging.getLogger('playwright').setLevel(logging.CRITICAL)
 
 class RightmoveAlert(commands.Cog):
-    """Cog to alert users of new Rightmove listings based on criteria."""
+    """Cog to alert users of new Rightmove listings based on configurable filters."""
     def __init__(self, bot):
         self.bot = bot
         self.scraper = RightmoveScraper()
@@ -49,23 +49,27 @@ class RightmoveAlert(commands.Cog):
         self.config.register_global(**global_defaults)
 
     async def cog_load(self):
+        """Start scraping and summary tasks on cog load."""
         self.scrape_sem = asyncio.Semaphore(3)
         self.scraping_loop.start()
         self.daily_summary.start()
         await self.log_event("Cog loaded and tasks started.")
 
     async def cog_unload(self):
+        """Clean up tasks and browser on cog unload."""
         self.scraping_loop.cancel()
         self.daily_summary.cancel()
         await self.scraper.close()
 
     @tasks.loop(seconds=600)
     async def scraping_loop(self):
+        """Loop that scrapes Rightmove for each area and processes user alerts."""
         try:
             interval = seconds_until_next_scrape()
             self.scraping_loop.change_interval(seconds=interval)
             users = await self.config.all_users()
-            enabled = {int(uid): data for uid, data in users.items() if data.get("enabled") and data.get("area")}
+            enabled = {int(uid): data for uid, data in users.items()
+                       if data.get("enabled") and data.get("area")}
             if not enabled:
                 return
             area_map = {}
@@ -118,15 +122,16 @@ class RightmoveAlert(commands.Cog):
                         except Exception as e:
                             await self.log_event(f"Error processing user {uid} listings: {e}")
 
-            tasks_list = [asyncio.create_task(process_area(area, ul)) for area, ul in area_map.items()]
+            tasks_list = [asyncio.create_task(process_area(area, ul))
+                          for area, ul in area_map.items()]
             if tasks_list:
                 await asyncio.gather(*tasks_list)
-
         except Exception as e:
             await self.log_event(f"Error in scraping loop: {e}")
 
     @tasks.loop(time=datetime.time(hour=23, minute=59))
     async def daily_summary(self):
+        """Post a daily summary of scraping statistics at 23:59 each day."""
         try:
             g = await getattr(self.config, "global")()
             listings_checked = g.get('listings_checked', 0)
@@ -160,6 +165,7 @@ class RightmoveAlert(commands.Cog):
             await self.log_event(f"Error in daily summary: {e}")
 
     async def log_event(self, message: str):
+        """Log debug or error messages to configured log channels."""
         ts = datetime.datetime.now(self.tz).strftime("%Y-%m-%d %H:%M:%S")
         full_msg = f"[{ts}] {message}"
         for guild in self.bot.guilds:
@@ -174,6 +180,7 @@ class RightmoveAlert(commands.Cog):
                         pass
 
     async def handle_listing(self, uid: int, listing: dict):
+        """Send alerts for a single listing to user DMs and alert channels."""
         embed = discord.Embed(
             title=listing.get("title", "Listing"),
             url=listing.get("url"),
@@ -225,82 +232,98 @@ class RightmoveAlert(commands.Cog):
 
     @commands.group(name="rmalert", invoke_without_command=True)
     async def rmalert(self, ctx):
+        """Manage Rightmove alerts."""
         await ctx.send_help()
 
     @rmalert.command()
     async def enable(self, ctx):
+        """Enable Rightmove alerts for your account."""
         await self.config.user(ctx.author).enabled.set(True)
         await ctx.send("Rightmove alerts enabled.")
 
     @rmalert.command()
     async def disable(self, ctx):
+        """Disable Rightmove alerts for your account."""
         await self.config.user(ctx.author).enabled.set(False)
         await ctx.send("Rightmove alerts disabled.")
 
     @rmalert.group(name="set", invoke_without_command=True)
     async def set(self, ctx):
+        """Set alert filters and preferences."""
         await ctx.send_help()
 
     @set.command(name="maxprice")
     async def set_maxprice(self, ctx, amount: int):
+        """Set the maximum price filter (in GBP)."""
         await self.config.user(ctx.author).maxprice.set(amount)
         await ctx.send(f"Max price set to £{amount}.")
 
     @set.command(name="minbeds")
     async def set_minbeds(self, ctx, count: int):
+        """Set the minimum number of bedrooms filter."""
         await self.config.user(ctx.author).minbeds.set(count)
         await ctx.send(f"Minimum bedrooms set to {count}.")
 
     @set.command(name="area")
     async def set_area(self, ctx, *, area: str):
+        """Set the area or postcode to search."""
         await self.config.user(ctx.author).area.set(area)
         await ctx.send(f"Area set to {area}.")
 
     @set.command(name="keyword")
     async def set_keyword(self, ctx, *, keyword: str):
+        """Set an optional keyword that must appear in listings."""
         await self.config.user(ctx.author).keyword.set(keyword)
         await ctx.send(f"Keyword set to '{keyword}'.")
 
     @set.command(name="blacklistleasehold")
     async def set_blacklistleasehold(self, ctx, toggle: bool):
+        """Toggle blocking leasehold properties on/off."""
         await self.config.user(ctx.author).blacklistleasehold.set(toggle)
         await ctx.send(f"Blacklist leasehold set to {toggle}.")
 
     @set.command(name="activehours")
     async def set_activehours(self, ctx, start1: str, end1: str, start2: str, end2: str):
+        """Set custom active scraping hours: HH:MM HH:MM HH:MM HH:MM."""
         hours = [[start1, end1], [start2, end2]]
         await self.config.user(ctx.author).active_hours.set(hours)
         await ctx.send(f"Active hours set to {start1}-{end1} and {start2}-{end2}.")
 
     @set.command(name="nightinterval")
     async def set_nightinterval(self, ctx, min_sec: int, max_sec: int):
+        """Set the interval range (in seconds) for off-hours scrapes."""
         await self.config.user(ctx.author).night_interval.set([min_sec, max_sec])
         await ctx.send(f"Night interval set to between {min_sec}s and {max_sec}s.")
 
     @set.group(name="channels", invoke_without_command=True)
     async def set_channels(self, ctx):
+        """Configure alert, log, and summary channels."""
         await ctx.send_help()
 
     @set_channels.command(name="alert")
     @commands.guild_only()
     async def set_channel_alert(self, ctx, channel: discord.TextChannel):
+        """Set the channel where new listing alerts are posted."""
         await self.config.guild(ctx.guild).alert_channel.set(channel.id)
         await ctx.send(f"Alert channel set to {channel.mention}.")
 
     @set_channels.command(name="log")
     @commands.guild_only()
     async def set_channel_log(self, ctx, channel: discord.TextChannel):
+        """Set the channel where debug and error logs are posted."""
         await self.config.guild(ctx.guild).log_channel.set(channel.id)
         await ctx.send(f"Log channel set to {channel.mention}.")
 
     @set_channels.command(name="summary")
     @commands.guild_only()
     async def set_channel_summary(self, ctx, channel: discord.TextChannel):
+        """Set the channel where daily summaries are posted."""
         await self.config.guild(ctx.guild).summary_channel.set(channel.id)
         await ctx.send(f"Summary channel set to {channel.mention}.")
 
     @rmalert.command()
     async def test(self, ctx):
+        """Run a test scrape and send a sample alert if a match is found."""
         data = await self.config.user(ctx.author).all()
         if not data.get("area"):
             return await ctx.send("Please set your area first.")
@@ -318,6 +341,7 @@ class RightmoveAlert(commands.Cog):
 
     @rmalert.command()
     async def status(self, ctx):
+        """Show your current alert settings and configured channels."""
         data = await self.config.user(ctx.author).all()
         embed = discord.Embed(title=f"{ctx.author.display_name}'s Settings")
         embed.add_field(name="Enabled", value=str(data.get("enabled")), inline=True)
