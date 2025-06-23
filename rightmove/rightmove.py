@@ -441,7 +441,6 @@ class RightmoveCog(commands.Cog):
         for cat in guild.categories:
             if not cat.name.startswith(CATEGORY_PREFIX):
                 continue
-            # gather (price, channel_id)
             ordering = []
             for ch in cat.channels:
                 if not isinstance(ch, discord.TextChannel):
@@ -472,6 +471,7 @@ class RightmoveCog(commands.Cog):
         }
         emoji, pre, color = emojis[event]
 
+        # r is a pandas Series for new/update/STC, or None for vanished
         if r is not None:
             price = r["price"]
             if color is None:
@@ -490,7 +490,11 @@ class RightmoveCog(commands.Cog):
                 f"Updated: <t:{r['updated_ts']}:F> (<t:{r['updated_ts']}:R>)"
             )
             embed = discord.Embed(title=title, color=color, description=desc)
-            embed.set_thumbnail(url=r["image_url"])
+
+            # use the big picture in the body
+            if r["image_url"]:
+                embed.set_image(url=r["image_url"])
+
             embed.add_field(name="💷 Price", value=f"£{int(price):,}", inline=True)
             embed.add_field(name="🛏 Bedrooms", value=str(r["number_bedrooms"]), inline=True)
             embed.add_field(name="🏠 Type", value=r["type"], inline=True)
@@ -500,6 +504,7 @@ class RightmoveCog(commands.Cog):
                 )
             await ch.send(embed=embed)
         else:
+            # vanished
             emoji, pre, color = emojis["vanished"]
             embed = discord.Embed(
                 title=f"{emoji} {pre}",
