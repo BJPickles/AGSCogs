@@ -2,6 +2,7 @@ import re
 import time
 import datetime
 import asyncio
+import math
 from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 
@@ -499,9 +500,12 @@ class RightmoveCog(commands.Cog):
             # price
             embed.add_field(name="💷 Price", value=f"£{int(price):,}", inline=True)
 
-            # bedrooms
+            # bedrooms: guard against NaN
             beds = r.get("number_bedrooms")
-            beds_str = str(int(beds)) if isinstance(beds, (int, float)) else "N/A"
+            if isinstance(beds, (int, float)) and not (isinstance(beds, float) and math.isnan(beds)):
+                beds_str = str(int(beds))
+            else:
+                beds_str = "N/A"
             embed.add_field(name="🛏 Bedrooms", value=beds_str, inline=True)
 
             # type
