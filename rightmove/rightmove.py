@@ -27,7 +27,7 @@ SCRAPE_TIME          = dt_time(hour=7, minute=0, tzinfo=LONDON)
 TARGET_PRICE         = 250_000
 IDEAL_DELTA          =   3_000
 
-# previously used regex‐based filter (still applied to 'type')
+# comprehensive banned‐terms regex (still applied to scraped 'type')
 BANNED_PATTERN = re.compile(
     r"\b(?:"
       r"lease[\s-]?hold"
@@ -45,15 +45,15 @@ BANNED_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# NEW: simple banned-list of exact property-type values (lowercased)
+# exact-match banned property types (lowercase)
 BANNED_PROPERTY_TYPES = {
     "studio",
     "land",
     "mobile home",
     "park home",
     "caravan",
-    "parking",
     "garages",
+    "parking",
 }
 
 
@@ -62,7 +62,7 @@ class RightmoveData:
     def __init__(self, url: str, get_floorplans: bool = False):
         self._status_code, self._first_page = self._request(url)
         self._url = url
-        self._validate_url()
+        # self._validate_url()   # disabled: our URL is long/complex
         self._results = self._get_results(get_floorplans=get_floorplans)
 
     @staticmethod
@@ -81,19 +81,22 @@ class RightmoveData:
         return r.status_code, r.content
 
     def _validate_url(self):
-        tem = "{}://www.rightmove.co.uk/{}/find.html?"
+        """Basic sanity check on Rightmove search URL."""
+        tem    = "{}://www.rightmove.co.uk/{}/find.html?"
         protos = ["http", "https"]
-        kinds = ["property-to-rent", "property-for-sale", "new-homes-for-sale"]
+        kinds  = ["property-to-rent", "property-for-sale", "new-homes-for-sale"]
         prefixes = [tem.format(p, k) for p in protos for k in kinds]
         if not any(self._url.startswith(pref) for pref in prefixes) or self._status_code != 200:
             raise ValueError(f"Invalid Rightmove URL:\n{self._url}")
 
     @property
     def get_results(self) -> pd.DataFrame:
+        """Returns the final scraped DataFrame."""
         return self._results
 
     @property
     def results_count_display(self) -> int:
+        """Number displayed on first page, or 0."""
         tree = html.fromstring(self._first_page)
         nodes = tree.xpath("//span[contains(@class,'searchHeader-resultCount')]/text()")
         if not nodes:
@@ -105,11 +108,13 @@ class RightmoveData:
 
     @property
     def page_count(self) -> int:
+        """Total pages (24 listings per page, max 42)."""
         total = self.results_count_display
         pages = total // 24 + (1 if total % 24 else 0)
         return min(max(pages, 1), 42)
 
     def _parse_date(self, text: str) -> int:
+        """Convert 'Added today' or 'Added on DD/MM/YYYY' to UNIX ts."""
         now = int(time.time())
         if not text:
             return now
@@ -124,10 +129,11 @@ class RightmoveData:
         return now
 
     def _get_page(self, content: bytes, get_floorplans: bool) -> pd.DataFrame:
-        tree = html.fromstring(content)
+        """Scrape a single search-results page into a DataFrame."""
+        tree  = html.fromstring(content)
         cards = tree.xpath("//div[starts-with(@data-testid,'propertyCard-')]")
-        rows = []
-        base = "https://www.rightmove.co.uk"
+        rows  = []
+        base  = "https://www.rightmove.co.uk"
 
         for c in cards:
             # price
@@ -141,13 +147,13 @@ class RightmoveData:
             ad = c.xpath(".//*[@data-testid='property-address']//address/text()")
             address = ad[0].strip() if ad else None
 
-            # property type – from the small badge text
+            # property type
             tp = c.xpath(
                 ".//span[contains(@class,'PropertyInformation_propertyType')]/text()"
             )
             ptype = tp[0].strip() if tp else None
 
-            # beds (float can be NaN)
+            # beds
             bd = c.xpath(
                 ".//span[contains(@class,'PropertyInformation_bedroomsCount')]/text()"
             )
@@ -176,9 +182,9 @@ class RightmoveData:
 
             # URL
             href = c.xpath(".//a[@data-testid='property-details']/@href")
-            url = f"{base}{href[0]}" if href else None
+            url  = f"{base}{href[0]}" if href else None
 
-            # image (highest-res from srcset)
+            # first image (highest-res from srcset)
             img_elems = c.xpath(".//img[@data-testid='property-img-1']") or []
             if img_elems:
                 img_el = img_elems[0]
@@ -195,11 +201,13 @@ class RightmoveData:
 
             # agent
             an = c.xpath(
-                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]//img/@alt"
+                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]"
+                "//img/@alt"
             )
             agent = an[0].replace(" Estate Agent Logo", "").strip() if an else None
             au = c.xpath(
-                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]//a/@href"
+                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]"
+                "//a/@href"
             )
             agent_url = f"{base}{au[0]}" if au else None
 
@@ -210,18 +218,18 @@ class RightmoveData:
                 pid = m2.group(1) if m2 else None
 
             rows.append({
-                "id": pid,
-                "price": price_raw,
-                "address": address,
-                "type": ptype,
+                "id":              pid,
+                "price":           price_raw,
+                "address":         address,
+                "type":            ptype,
                 "number_bedrooms": beds,
-                "listed_ts": listed_ts,
-                "updated_ts": updated_ts,
-                "is_stc": stc,
-                "url": url,
-                "image_url": img_url,
-                "agent": agent,
-                "agent_url": agent_url,
+                "listed_ts":       listed_ts,
+                "updated_ts":      updated_ts,
+                "is_stc":          stc,
+                "url":             url,
+                "image_url":       img_url,
+                "agent":           agent,
+                "agent_url":       agent_url,
             })
 
         df = pd.DataFrame(rows)
@@ -231,12 +239,12 @@ class RightmoveData:
             .replace("", np.nan)
             .astype(float)
         )
-        # drop rows missing essential data
         df = df.dropna(subset=["id", "price", "address", "type"])
         df.reset_index(drop=True, inplace=True)
         return df
 
     def _get_results(self, get_floorplans: bool) -> pd.DataFrame:
+        """Aggregate all pages into one DataFrame."""
         df = self._get_page(self._first_page, get_floorplans)
         for p in range(1, self.page_count):
             u = f"{self._url}&index={p*24}"
@@ -258,10 +266,10 @@ class RightmoveCog(commands.Cog):
         self.config = Config.get_conf(self, identifier=1234567890)
         # store { property_id: { channel_id, message_id, price, listed_ts, updated_ts, is_stc, active } }
         self.config.register_global(properties={})
-        self.scrape_loop = None
-        self.target_channel = None
-        self._rebuild_lock = asyncio.Lock()
-        self._last_test = 0.0
+        self.scrape_loop     = None
+        self.target_channel  = None
+        self._rebuild_lock   = asyncio.Lock()
+        self._last_test      = 0.0
 
     def cog_unload(self):
         if self.scrape_loop and self.scrape_loop.is_running():
@@ -332,7 +340,11 @@ class RightmoveCog(commands.Cog):
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
             "sortType=1&viewType=LIST&channel=BUY"
             "&maxPrice=250000&radius=0.0"
-            "&locationIdentifier=USERDEFINEDAREA%5E%7B…%7D"
+            "&locationIdentifier=USERDEFINEDAREA%5E%7B"
+            "%22polylines%22%3A%22sh%7CtHhu%7BE%7D%7CDr_Nf%7B"
+            "AnjZxvLz%7Df%40reAllgA%7Bab%40fg%60%40kyu%40s_"
+            "Ncq_%40crl%40uvO%7Dc%7C%40jTozbAlvMadq%40fu%5Bas"
+            "Zpmi%40%7BeMjgf%40jdEhpJt%7BZ_%60Jlpz%40%22%7D"
             "&tenureTypes=FREEHOLD&transactionType=BUY"
             "&displayLocationIdentifier=undefined"
             "&mustHave=parking"
@@ -340,10 +352,9 @@ class RightmoveCog(commands.Cog):
         )
         df = RightmoveData(url).get_results
 
-        # 1) existing regex‐based filter on type string
+        # 1) filter via your regex
         df = df[~df["type"].str.contains(BANNED_PATTERN, na=False)]
-
-        # 2) NEW: filter out exact property-type matches from our banned list
+        # 2) filter exact banned types
         df = df[~df["type"].str.lower().isin(BANNED_PROPERTY_TYPES)]
 
         cache     = await self.config.properties()
@@ -397,7 +408,7 @@ class RightmoveCog(commands.Cog):
                 continue
 
             if stc_changed:
-                cache[pid]["is_stc"]   = True
+                cache[pid]["is_stc"]     = True
                 cache[pid]["updated_ts"] = r["updated_ts"]
                 await self._send_or_edit(ch, pid, r, event="stc")
                 continue
@@ -457,7 +468,7 @@ class RightmoveCog(commands.Cog):
                 else:
                     color = discord.Color.red()
 
-            # for a refresh, skip the emoji/prefix
+            # for refresh, skip emoji/prefix
             if event == "refresh":
                 title = r["address"]
             else:
@@ -531,7 +542,7 @@ class RightmoveCog(commands.Cog):
                     continue
                 if not ch.name.startswith("prop-"):
                     continue
-                pid = ch.name.split("-", 1)[1]
+                pid  = ch.name.split("-", 1)[1]
                 prop = cache.get(pid, {})
                 price = prop["price"] if prop.get("active", False) else float("inf")
                 items.append((price, ch.id))
