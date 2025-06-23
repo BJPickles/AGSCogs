@@ -303,7 +303,6 @@ class RightmoveCog(commands.Cog):
         Optionally pass a channel and/or 'override':
           .rm test #channel override
         """
-        # parse override + optional channel
         override = False
         channel = None
         for arg in args:
@@ -317,14 +316,12 @@ class RightmoveCog(commands.Cog):
 
         self.target_channel = channel or self.target_channel or ctx.channel
 
-        # block if a rebuild is in progress
         if self._rebuild_lock.locked() and not override:
             return await ctx.send(
                 "❌ A rebuild is already in progress. "
                 "Please wait or use `.rm test override` to force."
             )
 
-        # 5 minute cooldown
         now = time.time()
         if (now - self._last_test) < 300 and not override:
             rem = int(300 - (now - self._last_test))
@@ -336,11 +333,11 @@ class RightmoveCog(commands.Cog):
 
         await ctx.send("🔄 Running manual scrape…")
         async with self._rebuild_lock:
-            await self.do_scrape()
+            await self.do_scrape(force_refresh=override)
         await ctx.send("✅ Manual scrape done.")
 
-    async def do_scrape(self):
-        # Full URL:
+    async def do_scrape(self, force_refresh: bool = False):
+        # Full URL without maxDaysSinceAdded to avoid 14-day auto-vanish
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
             "sortType=1&viewType=LIST&channel=BUY"
@@ -354,31 +351,23 @@ class RightmoveCog(commands.Cog):
             "&displayLocationIdentifier=undefined"
             "&mustHave=parking"
             "&dontShow=newHome%2Cretirement%2CsharedOwnership%2Cauction"
-            "&maxDaysSinceAdded=14"
         )
         df = RightmoveData(url).get_results
-        # filter out banned types
         df = df[~df["type"].str.contains(BANNED_PATTERN, na=False)]
 
         cache = await self.config.properties()
         new_props = {r["id"]: r for _, r in df.iterrows()}
         old_ids   = set(cache)
         new_ids   = set(new_props)
+        guild     = self.target_channel.guild
 
-        guild    = self.target_channel.guild
-
-        # find/create category under CATEGORY_PREFIX with <MAX_PER_CATEGORY> prop- channels
-        existing = [
-            c for c in guild.categories
-            if c.name.startswith(CATEGORY_PREFIX)
-        ]
+        # find/create category
+        existing = [c for c in guild.categories if c.name.startswith(CATEGORY_PREFIX)]
         existing.sort(key=lambda c: int(c.name.split()[-1]) if c.name.split()[-1].isdigit() else 1)
         target_cat = None
         for cat in existing:
-            cnt = sum(
-                1 for ch in cat.channels
-                if isinstance(ch, discord.TextChannel) and ch.name.startswith("prop-")
-            )
+            cnt = sum(1 for ch in cat.channels
+                      if isinstance(ch, discord.TextChannel) and ch.name.startswith("prop-"))
             if cnt < MAX_PER_CATEGORY:
                 target_cat = cat
                 break
@@ -431,7 +420,19 @@ class RightmoveCog(commands.Cog):
                     cache[pid]["active"] = False
                     await self.post_embed(ch, None, event="vanished")
 
+        # save updated cache
         await self.config.properties.set(cache)
+
+        # force-refresh formatting across all active channels
+        if force_refresh:
+            for pid, r in new_props.items():
+                data = cache.get(pid, {})
+                if not data.get("active", False):
+                    continue
+                ch = guild.get_channel(data["channel_id"])
+                if ch:
+                    await self.post_embed(ch, r, event="refresh")
+
         # finally, reorder every category
         await self._reorder_channels()
 
@@ -464,19 +465,18 @@ class RightmoveCog(commands.Cog):
 
     async def post_embed(self, ch: discord.TextChannel, r, event: str):
         emojis = {
-            "new": ("🆕", "New", None),
-            "price_update": ("🔄", "Price Updated", None),
-            "stc": ("💖", "[STC]", discord.Color.magenta()),
-            "vanished": ("❌", "Vanished", discord.Color.greyple()),
+            "new":           ("🆕", "New", None),
+            "price_update":  ("🔄", "Price Updated", None),
+            "stc":           ("💖", "[STC]", discord.Color.magenta()),
+            "vanished":      ("❌", "Vanished", discord.Color.greyple()),
+            "refresh":       ("♻️", "Refreshed", None),
         }
         emoji, pre, color = emojis[event]
 
-        # r is a pandas Series for new/update/STC, or None for vanished
         if r is not None:
             price = r["price"]
             if color is None:
                 if abs(price - TARGET_PRICE) <= IDEAL_DELTA:
-                    # replaced unsupported light_blue() with blue()
                     color = discord.Color.blue()
                 elif price <= 170_000:
                     color = discord.Color.green()
@@ -486,25 +486,25 @@ class RightmoveCog(commands.Cog):
                     color = discord.Color.red()
 
             title = f"{emoji} {pre} — {r['address']}"
-            desc = (
+            desc  = (
                 f"Listed: <t:{r['listed_ts']}:F> (<t:{r['listed_ts']}:R>)\n"
                 f"Updated: <t:{r['updated_ts']}:F> (<t:{r['updated_ts']}:R>)"
             )
             embed = discord.Embed(title=title, color=color, description=desc)
 
-            # large image in the embed body
+            # large image
             if r["image_url"]:
                 embed.set_image(url=r["image_url"])
 
             # price
             embed.add_field(name="💷 Price", value=f"£{int(price):,}", inline=True)
 
-            # bedrooms (cast to int so "1.0" becomes "1")
+            # bedrooms
             beds = r.get("number_bedrooms")
             beds_str = str(int(beds)) if isinstance(beds, (int, float)) else "N/A"
             embed.add_field(name="🛏 Bedrooms", value=beds_str, inline=True)
 
-            # property type
+            # type
             embed.add_field(name="🏠 Type", value=r["type"], inline=True)
 
             # agent
@@ -515,7 +515,7 @@ class RightmoveCog(commands.Cog):
                     inline=True
                 )
 
-            # direct Rightmove listing link
+            # direct listing link
             if r["url"]:
                 embed.add_field(
                     name="🔗 Listing",
@@ -526,11 +526,10 @@ class RightmoveCog(commands.Cog):
             await ch.send(embed=embed)
 
         else:
-            # vanished
             emoji, pre, color = emojis["vanished"]
             embed = discord.Embed(
                 title=f"{emoji} {pre}",
                 color=color,
-                description="This property has vanished from the search.",
+                description="This property has vanished from the search."
             )
             await ch.send(embed=embed)
