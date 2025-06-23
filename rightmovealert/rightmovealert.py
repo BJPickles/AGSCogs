@@ -10,7 +10,7 @@ from discord.ext import tasks
 from redbot.core import commands, Config
 
 from .scraper import RightmoveScraper, CaptchaError
-from .utils import seconds_until_next_scrape, filter_listings, now_in_windows
+from .filters import seconds_until_next_scrape, filter_listings, now_in_windows
 
 logging.getLogger('playwright').setLevel(logging.CRITICAL)
 
