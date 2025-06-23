@@ -1,8 +1,6 @@
 import logging
 import asyncio
 import datetime
-import io
-import random
 
 import pytz
 import discord
@@ -28,6 +26,7 @@ class RightmoveAlert(commands.Cog):
             "maxprice": None,
             "minbeds": None,
             "area": None,
+            "region_code": None,
             "keywords": [],
             "customblacklist": [],
             "blacklistleasehold": True,
@@ -52,14 +51,14 @@ class RightmoveAlert(commands.Cog):
         self._startup_logged = False
 
     async def cog_load(self):
-        """Start scraping and summary tasks on cog load."""
+        """Start scraping and summary tasks when the cog loads."""
         self.scrape_sem = asyncio.Semaphore(3)
         self.scraping_loop.start()
         self.daily_summary.start()
         self.bot.loop.create_task(self._delayed_startup_log())
 
     async def _delayed_startup_log(self):
-        """Log cog load once bot is ready."""
+        """Allow the bot to become ready before logging startup."""
         await self.bot.wait_until_ready()
         if self._startup_logged:
             return
@@ -68,14 +67,14 @@ class RightmoveAlert(commands.Cog):
         await self.log_event("Cog loaded and tasks started.")
 
     async def cog_unload(self):
-        """Clean up tasks and browser on cog unload."""
+        """Clean up tasks and browser when the cog unloads."""
         self.scraping_loop.cancel()
         self.daily_summary.cancel()
         await self.scraper.close()
 
     @tasks.loop(seconds=600)
     async def scraping_loop(self):
-        """Loop that scrapes Rightmove for each area and processes user alerts."""
+        """Main loop: scrape per-area and send alerts."""
         try:
             interval = seconds_until_next_scrape()
             self.scraping_loop.change_interval(seconds=interval)
@@ -94,47 +93,48 @@ class RightmoveAlert(commands.Cog):
 
             async def process_area(area, user_list):
                 async with self.scrape_sem:
-                    try:
-                        listings = await self.scraper.scrape_area(area)
-                        self.scraper.backoff_count = 0
-                    except CaptchaError as e:
-                        await self.log_event(f"Captcha detected scraping {area}, backing off: {e}")
-                        self.scraper.backoff_count += 1
-                        delay = min((2 ** self.scraper.backoff_count) * 60, 3600)
-                        await asyncio.sleep(delay)
-                        return
-                    except Exception as e:
-                        await self.log_event(f"Error scraping area {area}: {e}")
-                        self.scraper.backoff_count += 1
-                        delay = min((2 ** self.scraper.backoff_count) * 10, 600)
-                        await asyncio.sleep(delay)
-                        return
-
-                    async with getattr(self.config, "global")() as g:
-                        g["listings_checked"] += len(listings)
-
                     for uid, data in user_list:
+                        now = datetime.datetime.now(self.tz)
                         if not now_in_windows(data.get("active_hours")):
                             continue
                         try:
-                            matches, blocked = filter_listings(listings, data)
-                            async with getattr(self.config, "global")() as g:
-                                g["matched"] += len(matches)
-                                g["blocked"] += blocked
-                            seen = set(data.get("seen", []))
-                            new = [l for l in matches if l["id"] not in seen]
-                            if not new:
-                                continue
-                            for listing in new:
-                                await self.handle_listing(uid, listing)
-                                seen.add(listing["id"])
-                            await self.config.user(uid).seen.set(list(seen))
-                            async with getattr(self.config, "global")() as g:
-                                ua = g.get("user_alerts", {})
-                                ua[str(uid)] = ua.get(str(uid), 0) + len(new)
-                                g["user_alerts"] = ua
+                            maxp = data.get("maxprice")
+                            region = data.get("region_code")
+                            listings = await self.scraper.scrape_area(area, maxp, region)
+                            self.scraper.backoff_count = 0
+                        except CaptchaError as e:
+                            await self.log_event(f"Captcha detected for area '{area}': {e}")
+                            self.scraper.backoff_count += 1
+                            delay = min((2 ** self.scraper.backoff_count) * 60, 3600)
+                            await asyncio.sleep(delay)
+                            continue
                         except Exception as e:
-                            await self.log_event(f"Error processing user {uid} listings: {e}")
+                            await self.log_event(f"Error scraping area '{area}': {e}")
+                            self.scraper.backoff_count += 1
+                            delay = min((2 ** self.scraper.backoff_count) * 10, 600)
+                            await asyncio.sleep(delay)
+                            continue
+
+                        async with getattr(self.config, "global")() as g:
+                            g["listings_checked"] += len(listings)
+
+                        matches, blocked = filter_listings(listings, data)
+                        async with getattr(self.config, "global")() as g:
+                            g["matched"] += len(matches)
+                            g["blocked"] += blocked
+
+                        seen = set(data.get("seen", []))
+                        new = [l for l in matches if l["id"] not in seen]
+                        if not new:
+                            continue
+                        for listing in new:
+                            await self.handle_listing(uid, listing)
+                            seen.add(listing["id"])
+                        await self.config.user(uid).seen.set(list(seen))
+                        async with getattr(self.config, "global")() as g:
+                            ua = g.get("user_alerts", {})
+                            ua[str(uid)] = ua.get(str(uid), 0) + len(new)
+                            g["user_alerts"] = ua
 
             tasks_list = [
                 asyncio.create_task(process_area(area, ul))
@@ -147,7 +147,7 @@ class RightmoveAlert(commands.Cog):
 
     @tasks.loop(time=datetime.time(hour=23, minute=59))
     async def daily_summary(self):
-        """Post a daily summary of scraping statistics at 23:59 each day."""
+        """Post a daily summary of statistics each day at 23:59."""
         try:
             now_ts = int(datetime.datetime.now(self.tz).timestamp())
             g = await getattr(self.config, "global")()
@@ -187,7 +187,7 @@ class RightmoveAlert(commands.Cog):
             await self.log_event(f"Error in daily summary: {e}")
 
     async def log_event(self, message: str):
-        """Log debug or error messages to configured log channels."""
+        """Send a log message to all configured log channels."""
         now_ts = int(datetime.datetime.now(self.tz).timestamp())
         full_msg = f"{message} — <t:{now_ts}:F> (<t:{now_ts}:R>)"
         for guild in self.bot.guilds:
@@ -202,7 +202,7 @@ class RightmoveAlert(commands.Cog):
                         pass
 
     async def handle_listing(self, uid: int, listing: dict):
-        """Send alerts for a single listing, letting Discord auto-generate the link preview."""
+        """Send a listing alert via DM and in the guild alert channel."""
         now_ts = int(datetime.datetime.now(self.tz).timestamp())
         url = listing.get("url")
         embed = discord.Embed(
@@ -211,15 +211,14 @@ class RightmoveAlert(commands.Cog):
             timestamp=datetime.datetime.fromtimestamp(now_ts, tz=self.tz)
         )
         embed.add_field(name="Price", value=f"£{listing.get('price')}", inline=True)
-        embed.add_field(name="Beds", value=str(listing.get('beds')), inline=True)
-        embed.add_field(name="Location", value=listing.get('location', "Unknown"), inline=False)
+        embed.add_field(name="Beds", value=str(listing.get("beds")), inline=True)
+        embed.add_field(name="Location", value=listing.get("location", "Unknown"), inline=False)
         embed.add_field(
             name="Scraped At",
             value=f"<t:{now_ts}:F> (<t:{now_ts}:R>)",
             inline=False
         )
 
-        # DM the user with the URL (Discord will auto-embed a preview) plus our embed
         user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
         if user:
             try:
@@ -227,7 +226,6 @@ class RightmoveAlert(commands.Cog):
             except:
                 await self.log_event(f"Failed to DM user {uid}")
 
-        # Send to each guild's alert channel, mention the user and include URL in content
         for guild in self.bot.guilds:
             member = guild.get_member(uid)
             if not member:
@@ -241,7 +239,6 @@ class RightmoveAlert(commands.Cog):
                         await ch.send(f"<@{uid}> {url}", embed=embed)
                     except:
                         await self.log_event(f"Failed to send alert to channel {alert_ch_id} for user {uid}")
-            # Also log the alert
             log_ch_id = cfg.get("log_channel")
             if log_ch_id:
                 log_ch = self.bot.get_channel(log_ch_id)
@@ -258,222 +255,136 @@ class RightmoveAlert(commands.Cog):
 
     @rmalert.command()
     async def enable(self, ctx):
-        """Enable Rightmove alerts for your account."""
+        """Enable Rightmove alerts."""
         await self.config.user(ctx.author).enabled.set(True)
         await ctx.send("Rightmove alerts enabled.")
 
     @rmalert.command()
     async def disable(self, ctx):
-        """Disable Rightmove alerts for your account."""
+        """Disable Rightmove alerts."""
         await self.config.user(ctx.author).enabled.set(False)
         await ctx.send("Rightmove alerts disabled.")
 
     @rmalert.group(name="set", invoke_without_command=True)
     async def set(self, ctx):
-        """Set alert filters and preferences."""
+        """Configure your alert settings."""
         await ctx.send_help()
 
     @set.command(name="maxprice")
     async def set_maxprice(self, ctx, amount: int):
-        """Set the maximum price filter (in GBP)."""
+        """Set maximum price."""
         await self.config.user(ctx.author).maxprice.set(amount)
         await ctx.send(f"Max price set to £{amount}.")
 
     @set.command(name="minbeds")
     async def set_minbeds(self, ctx, count: int):
-        """Set the minimum number of bedrooms filter."""
+        """Set minimum bedrooms."""
         await self.config.user(ctx.author).minbeds.set(count)
         await ctx.send(f"Minimum bedrooms set to {count}.")
 
     @set.command(name="area")
     async def set_area(self, ctx, *, area: str):
-        """Set the area or postcode to search."""
+        """Set the area or display name for your search."""
         await self.config.user(ctx.author).area.set(area)
         await ctx.send(f"Area set to {area}.")
 
+    @set.command(name="region")
+    async def set_region(self, ctx, *, code: str):
+        """Set the URL region code (percent-encoded)."""
+        await self.config.user(ctx.author).region_code.set(code)
+        await ctx.send(f"Region code set to `{code}`.")
+
+    @set.command(name="keyword")
+    async def set_keyword(self, ctx, *, keyword: str):
+        """Set a single keyword (deprecated; use [p]rmalert set keywords add)."""
+        await self.config.user(ctx.author).keywords.set([keyword.lower().strip()])
+        await ctx.send(f"Keyword set to `{keyword}`.")
+
     @set.command(name="blacklistleasehold")
     async def set_blacklistleasehold(self, ctx, toggle: bool):
-        """Toggle blocking leasehold properties on/off."""
+        """Toggle leasehold blacklist."""
         await self.config.user(ctx.author).blacklistleasehold.set(toggle)
         await ctx.send(f"Blacklist leasehold set to {toggle}.")
 
     @set.command(name="activehours")
     async def set_activehours(self, ctx, start1: str, end1: str, start2: str, end2: str):
-        """Set custom active scraping hours: HH:MM HH:MM HH:MM HH:MM."""
+        """Set your active scraping windows."""
         hours = [[start1, end1], [start2, end2]]
         await self.config.user(ctx.author).active_hours.set(hours)
-        await ctx.send(f"Active hours set to {start1}-{end1} and {start2}-{end2}.")
+        await ctx.send(f"Active hours set to {hours}.")
 
     @set.command(name="nightinterval")
     async def set_nightinterval(self, ctx, min_sec: int, max_sec: int):
-        """Set the interval range (in seconds) for off-hours scrapes."""
+        """Set off-hours scrape interval (sec)."""
         await self.config.user(ctx.author).night_interval.set([min_sec, max_sec])
-        await ctx.send(f"Night interval set to between {min_sec}s and {max_sec}s.")
-
-    @set.group(name="keywords", invoke_without_command=True)
-    async def keywords(self, ctx):
-        """Manage your whitelist keywords."""
-        await ctx.send_help()
-
-    @keywords.command(name="add")
-    async def keywords_add(self, ctx, *, keyword: str):
-        """Add a keyword to your whitelist."""
-        kw = keyword.lower().strip()
-        kws = await self.config.user(ctx.author).keywords()
-        if kw in kws:
-            return await ctx.send(f"'{kw}' is already in your whitelist.")
-        kws.append(kw)
-        await self.config.user(ctx.author).keywords.set(kws)
-        await ctx.send(f"Whitelist keyword added: '{kw}'.")
-
-    @keywords.command(name="remove")
-    async def keywords_remove(self, ctx, *, keyword: str):
-        """Remove a keyword from your whitelist."""
-        kw = keyword.lower().strip()
-        kws = await self.config.user(ctx.author).keywords()
-        if kw not in kws:
-            return await ctx.send(f"'{kw}' not found in your whitelist.")
-        kws.remove(kw)
-        await self.config.user(ctx.author).keywords.set(kws)
-        await ctx.send(f"Whitelist keyword removed: '{kw}'.")
-
-    @keywords.command(name="clear")
-    async def keywords_clear(self, ctx):
-        """Clear all whitelist keywords."""
-        await self.config.user(ctx.author).keywords.set([])
-        await ctx.send("All whitelist keywords cleared.")
-
-    @keywords.command(name="list")
-    async def keywords_list(self, ctx):
-        """List your current whitelist keywords."""
-        kws = await self.config.user(ctx.author).keywords()
-        if not kws:
-            return await ctx.send("Your whitelist is empty.")
-        await ctx.send("Whitelist keywords:\n" + "\n".join(f"- {kw}" for kw in kws))
-
-    @set.group(name="customblacklist", invoke_without_command=True)
-    async def customblacklist(self, ctx):
-        """Manage your custom blacklist terms."""
-        await ctx.send_help()
-
-    @customblacklist.command(name="add")
-    async def customblacklist_add(self, ctx, *, term: str):
-        """Add a term to your custom blacklist."""
-        term_l = term.lower().strip()
-        bl = await self.config.user(ctx.author).customblacklist()
-        if term_l in bl:
-            return await ctx.send(f"'{term_l}' is already in your custom blacklist.")
-        bl.append(term_l)
-        await self.config.user(ctx.author).customblacklist.set(bl)
-        await ctx.send(f"Custom blacklist term added: '{term_l}'.")
-
-    @customblacklist.command(name="remove")
-    async def customblacklist_remove(self, ctx, *, term: str):
-        """Remove a term from your custom blacklist."""
-        term_l = term.lower().strip()
-        bl = await self.config.user(ctx.author).customblacklist()
-        if term_l not in bl:
-            return await ctx.send(f"'{term_l}' not found in your custom blacklist.")
-        bl.remove(term_l)
-        await self.config.user(ctx.author).customblacklist.set(bl)
-        await ctx.send(f"Custom blacklist term removed: '{term_l}'.")
-
-    @customblacklist.command(name="clear")
-    async def customblacklist_clear(self, ctx):
-        """Clear all custom blacklist terms."""
-        await self.config.user(ctx.author).customblacklist.set([])
-        await ctx.send("All custom blacklist terms cleared.")
-
-    @customblacklist.command(name="list")
-    async def customblacklist_list(self, ctx):
-        """List your current custom blacklist terms."""
-        bl = await self.config.user(ctx.author).customblacklist()
-        if not bl:
-            return await ctx.send("Your custom blacklist is empty.")
-        await ctx.send("Custom blacklist terms:\n" + "\n".join(f"- {term}" for term in bl))
+        await ctx.send(f"Night interval set to {min_sec}-{max_sec}s.")
 
     @set.group(name="channels", invoke_without_command=True)
     async def set_channels(self, ctx):
-        """Configure alert, log, and summary channels."""
+        """Configure channels."""
         await ctx.send_help()
 
     @set_channels.command(name="alert")
     @commands.guild_only()
     async def set_channel_alert(self, ctx, channel: discord.TextChannel):
-        """Set the channel where new listing alerts are posted."""
+        """Set alert channel."""
         await self.config.guild(ctx.guild).alert_channel.set(channel.id)
         await ctx.send(f"Alert channel set to {channel.mention}.")
 
     @set_channels.command(name="log")
     @commands.guild_only()
     async def set_channel_log(self, ctx, channel: discord.TextChannel):
-        """Set the channel where debug and error logs are posted."""
+        """Set log channel."""
         await self.config.guild(ctx.guild).log_channel.set(channel.id)
         await ctx.send(f"Log channel set to {channel.mention}.")
 
     @set_channels.command(name="summary")
     @commands.guild_only()
     async def set_channel_summary(self, ctx, channel: discord.TextChannel):
-        """Set the channel where daily summaries are posted."""
+        """Set summary channel."""
         await self.config.guild(ctx.guild).summary_channel.set(channel.id)
         await ctx.send(f"Summary channel set to {channel.mention}.")
 
     @rmalert.command()
     async def test(self, ctx):
-        """Run a test scrape and send a sample alert if a match is found."""
+        """Run a test scrape and alert."""
         data = await self.config.user(ctx.author).all()
-        try:
-            print("TEST data ->", data, type(data))
-            listings = await self.scraper.scrape_area(data.get("area"))
-            print("TEST listings ->", listings[:2], type(listings))
-            matches, _ = filter_listings(listings, data)
-            print("TEST matches ->", matches[:2], type(matches))
-            if matches:
-                await self.handle_listing(ctx.author.id, matches[0])
-                await ctx.send("Test alert sent.")
-            else:
-                await ctx.send("No matching listings found for test.")
-        except Exception as e:
-            import traceback
-            tb = traceback.format_exc()
-            await self.log_event(f"Error during test for user {ctx.author.id}: {e}\n{tb}")
-            await ctx.send("An error occurred during test.")
+        if not data.get("area"):
+            return await ctx.send("Please set your area or region first.")
+        maxp = data.get("maxprice")
+        region = data.get("region_code")
+        listings = await self.scraper.scrape_area(data.get("area"), maxp, region)
+        if listings:
+            await self.handle_listing(ctx.author.id, listings[0])
+            await ctx.send("Test alert sent.")
+        else:
+            await ctx.send("No matching listings found for test.")
 
     @rmalert.command()
     async def status(self, ctx):
-        """Show your current alert settings and configured channels."""
+        """Show your settings."""
         data = await self.config.user(ctx.author).all()
         embed = discord.Embed(title=f"{ctx.author.display_name}'s Settings")
         embed.add_field(name="Enabled", value=str(data.get("enabled")), inline=True)
         embed.add_field(name="Area", value=data.get("area") or "Not set", inline=True)
-        embed.add_field(
-            name="Max Price",
-            value=(f"£{data.get('maxprice')}" if data.get("maxprice") else "Not set"),
-            inline=True
-        )
-        embed.add_field(
-            name="Min Beds",
-            value=(str(data.get("minbeds")) if data.get("minbeds") else "Not set"),
-            inline=True
-        )
+        embed.add_field(name="Region Code", value=data.get("region_code") or "None", inline=True)
+        embed.add_field(name="Max Price", value=f"£{data.get('maxprice')}" if data.get("maxprice") else "None", inline=True)
+        embed.add_field(name="Min Beds", value=str(data.get("minbeds")) or "None", inline=True)
         kws = data.get("keywords", [])
-        embed.add_field(name="Whitelist Keywords", value=", ".join(kws) or "None", inline=False)
+        embed.add_field(name="Keywords", value=", ".join(kws) or "None", inline=False)
         bl = data.get("customblacklist", [])
         embed.add_field(name="Custom Blacklist", value=", ".join(bl) or "None", inline=False)
         embed.add_field(name="Blacklist Leasehold", value=str(data.get("blacklistleasehold")), inline=True)
-        ah = ", ".join(f"{a[0]}-{a[1]}" for a in data.get("active_hours", []))
+        ah = ", ".join(f"{w[0]}-{w[1]}" for w in data.get("active_hours", []))
         embed.add_field(name="Active Hours", value=ah or "Default", inline=True)
         ni = data.get("night_interval", [])
-        ni_text = f"{ni[0]}s-{ni[1]}s" if ni else "Default"
-        embed.add_field(name="Night Interval", value=ni_text, inline=True)
-        embed.add_field(name="Seen Listings", value=str(len(data.get("seen", []))), inline=True)
+        embed.add_field(name="Night Interval", value=(f"{ni[0]}s-{ni[1]}s" if ni else "Default"), inline=True)
+        embed.add_field(name="Seen", value=str(len(data.get("seen", []))), inline=True)
         guild_cfg = await self.config.guild(ctx.guild).all()
-        ac = guild_cfg.get("alert_channel")
-        lc = guild_cfg.get("log_channel")
-        sc = guild_cfg.get("summary_channel")
-        embed.add_field(name="Alert Channel", value=(f"<#{ac}>" if ac else "Not set"), inline=True)
-        embed.add_field(name="Log Channel", value=(f"<#{lc}>" if lc else "Not set"), inline=True)
-        embed.add_field(name="Summary Channel", value=(f"<#{sc}>" if sc else "Not set"), inline=True)
+        ac, lc, sc = guild_cfg.get("alert_channel"), guild_cfg.get("log_channel"), guild_cfg.get("summary_channel")
+        embed.add_field(name="Alert Channel", value=(f"<#{ac}>" if ac else "None"), inline=True)
+        embed.add_field(name="Log Channel", value=(f"<#{lc}>" if lc else "None"), inline=True)
+        embed.add_field(name="Summary Channel", value=(f"<#{sc}>" if sc else "None"), inline=True)
         now_ts = int(datetime.datetime.now(self.tz).timestamp())
         embed.add_field(name="Status Generated", value=f"<t:{now_ts}:F> (<t:{now_ts}:R>)", inline=False)
         await ctx.send(embed=embed)
