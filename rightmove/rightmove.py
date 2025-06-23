@@ -222,7 +222,7 @@ class RightmoveData:
         df = self._get_page(self._first_page, get_floorplans)
         for p in range(1, self.page_count):
             u = f"{self._url}&index={p*24}"
-            sc,ct = self._request(u)
+            sc, ct = self._request(u)
             if sc != 200:
                 break
             tmp = self._get_page(ct, get_floorplans)
@@ -394,7 +394,8 @@ class RightmoveCog(commands.Cog):
         }
         emoji, pre, color = emojis[event]
 
-        if r:
+        # Only check for None; pandas.Series cannot be truth-tested directly
+        if r is not None:
             price = r["price"]
             if color is None:
                 if abs(price - TARGET_PRICE) <= IDEAL_DELTA:
@@ -422,6 +423,7 @@ class RightmoveCog(commands.Cog):
                 )
             await ch.send(embed=embed)
         else:
+            # vanished
             emoji, pre, color = emojis["vanished"]
             embed = discord.Embed(
                 title=f"{emoji} {pre}",
