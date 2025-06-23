@@ -13,7 +13,7 @@ class RightmoveScraper:
         self.playwright: Playwright = None
         self.context: BrowserContext = None
         self.backoff_count = 0
-        # default polygon from your example URL (percent-encoded)
+        # default polygon identifier (percent-encoded) from your example
         self._default_encoded = (
             "USERDEFINEDAREA%5E%7B%22polylines%22%3A%22"
             "sh%7CtHhu%7BE%7D%7CDr_Nf%7BAnjZxvLz%7Dm%40reAllgA%7Bab"
@@ -66,10 +66,13 @@ class RightmoveScraper:
             """)
 
     async def scrape_area(self, area: str, max_price: int = None) -> list:
+        """
+        Scrape Rightmove using a direct URL. Removes the 'mustHave=parking' filter.
+        """
         await self._init()
         page = await self.context.new_page()
         try:
-            # occasional detour to simulate browsing
+            # occasional detour
             if random.random() < 0.3:
                 for extra in ["/news","/why-buy","/help","/offers-for-sellers","/guides","/overseas"]:
                     await page.goto(f"https://www.rightmove.co.uk{extra}")
@@ -79,7 +82,7 @@ class RightmoveScraper:
                 await page.wait_for_load_state("networkidle")
                 await asyncio.sleep(random.uniform(1,2))
 
-            # get locationIdentifier via autocomplete API
+            # attempt autocomplete
             identifier = None
             try:
                 resp = await page.request.get(
@@ -93,11 +96,11 @@ class RightmoveScraper:
             except:
                 identifier = None
 
-            # fallback to default polygon
+            # fallback
             if not identifier:
                 identifier = self._default_encoded
 
-            # build URL with your example parameters
+            # build URL (parking filter removed)
             price_q = max_price if max_price is not None else ""
             search_url = (
                 "https://www.rightmove.co.uk/property-for-sale/find.html?"
@@ -106,7 +109,7 @@ class RightmoveScraper:
                 f"&locationIdentifier={quote(identifier, safe='')}"
                 f"&tenureTypes=FREEHOLD&transactionType=BUY"
                 f"&displayLocationIdentifier=undefined"
-                f"&mustHave=parking"
+                # f"&mustHave=parking"    ← REMOVED
                 f"&dontShow=newHome,retirement,sharedOwnership,auction"
             )
 
@@ -115,13 +118,13 @@ class RightmoveScraper:
             await page.wait_for_load_state("networkidle")
             await asyncio.sleep(random.uniform(2,4))
 
-            # human-like scrolls
+            # human-like scroll
             for _ in range(random.randint(2,5)):
                 scroll_height = await page.evaluate("document.body.scrollHeight")
                 await page.evaluate(f"window.scrollTo(0, {random.randint(0, scroll_height)})")
                 await asyncio.sleep(random.uniform(0.5,1.5))
 
-            # gather cards via multiple selectors
+            # gather cards
             cards = []
             cards += await page.query_selector_all(".propertyCard")
             cards += await page.query_selector_all("li.component_property-card")
@@ -172,6 +175,7 @@ class RightmoveScraper:
             await page.close()
 
     async def close(self):
+        """Close browser context and Playwright."""
         if self.context:
             await self.context.close()
         if self.playwright:
