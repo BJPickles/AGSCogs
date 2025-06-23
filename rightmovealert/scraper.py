@@ -61,51 +61,78 @@ class RightmoveScraper:
         await self._init()
         page = await self.context.new_page()
         try:
+            # Optional random detour pages
             if random.random() < 0.3:
                 extras = ["/news", "/why-buy", "/help", "/offers-for-sellers", "/guides", "/overseas"]
                 await page.goto(f"https://www.rightmove.co.uk{random.choice(extras)}")
                 await page.wait_for_load_state("networkidle")
-                await asyncio.sleep(random.uniform(2,4))
+                await asyncio.sleep(random.uniform(2, 4))
                 await page.goto("https://www.rightmove.co.uk")
                 await page.wait_for_load_state("networkidle")
-                await asyncio.sleep(random.uniform(1,2))
+                await asyncio.sleep(random.uniform(1, 2))
+
+            # Main search page
             await page.goto("https://www.rightmove.co.uk")
-            await asyncio.sleep(random.uniform(2,5))
+            await asyncio.sleep(random.uniform(2, 5))
             if "captcha" in page.url.lower():
                 raise CaptchaError("Captcha page detected")
-            # random mouse movements
+
+            # Human-like mouse movements
             viewport = page.viewport_size
-            for _ in range(random.randint(5,10)):
+            for _ in range(random.randint(5, 10)):
                 x = random.randint(0, viewport["width"])
                 y = random.randint(0, viewport["height"])
-                await page.mouse.move(x, y, steps=random.randint(5,20))
-                await asyncio.sleep(random.uniform(0.1,0.5))
-            # random scrolling
+                await page.mouse.move(x, y, steps=random.randint(5, 20))
+                await asyncio.sleep(random.uniform(0.1, 0.5))
+
+            # Random scrolling
             scroll_height = await page.evaluate("document.body.scrollHeight")
-            for _ in range(random.randint(2,5)):
+            for _ in range(random.randint(2, 5)):
                 pos = random.randint(0, scroll_height)
                 await page.evaluate(f"window.scrollTo(0, {pos})")
-                await asyncio.sleep(random.uniform(0.5,1.5))
-            # simulate returning user
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+
+            # Simulate returning user
             await page.evaluate("localStorage.setItem('visit_time', Date.now().toString())")
-            # search
+
+            # Locate the search input with fallbacks
+            search_selectors = [
+                'input[id="searchLocation"]',
+                'input[name="searchLocation"]'
+            ]
+            field = None
+            for selector in search_selectors:
+                try:
+                    await page.wait_for_selector(selector, timeout=5000)
+                    field = selector
+                    break
+                except asyncio.TimeoutError:
+                    continue
+            if not field:
+                return []
+
+            # Click & fill the search box
             try:
-                await page.click('input[id="searchLocation"]')
-                await page.fill('input[id="searchLocation"]', area)
+                await page.click(field, timeout=5000)
             except:
-                await page.fill('input[name="searchLocation"]', area)
-            await asyncio.sleep(random.uniform(1,3))
+                pass
+            await page.fill(field, area, timeout=5000)
+            await asyncio.sleep(random.uniform(1, 3))
+
+            # Submit search
             try:
-                await page.click('button:has-text("Find properties")')
+                await page.click('button:has-text("Find properties")', timeout=5000)
             except:
-                await page.click('button[type="submit"]')
+                await page.click('button[type="submit"]', timeout=5000)
             await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(random.uniform(2,4))
-            # more scrolling
+            await asyncio.sleep(random.uniform(2, 4))
+
+            # More scrolling to load results
             scroll_height = await page.evaluate("document.body.scrollHeight")
             await page.evaluate(f"window.scrollTo(0, {random.randint(0, scroll_height)})")
-            await asyncio.sleep(random.uniform(1,2))
-            # extract listings
+            await asyncio.sleep(random.uniform(1, 2))
+
+            # Scrape property cards
             cards = await page.query_selector_all(".propertyCard")
             results = []
             for card in cards:
