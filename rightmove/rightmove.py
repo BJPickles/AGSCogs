@@ -34,23 +34,28 @@ BANNED_PROPERTY_TYPES = {
     "mobile home",
     "park home",
     "caravan",
-    "garages",
-    "parking",
     "garage",
     "garages",
+    "parking",
 }
 
 # substring‐based banned descriptors (lowercase)
 BANNED_TYPE_SUBSTRINGS = [
+    # leasehold variants
     "leasehold", "lease hold", "lease-hold",
-    "shared ownership", "shared-ownership",
+    # shared ownership
+    "sharedownership", "shared ownership", "shared-ownership",
+    # over 50s
     "over 50", "over50", "over-50", "over 50s", "over50s", "over-50s",
-    "holiday home", "holiday-home", "holiday homes", "holiday-homes",
-    "park home", "park-home", "park homes", "park-homes",
-    "mobile home", "mobile-home",
+    # holiday home
+    "holiday home", "holiday-home", "holidayhome", "holiday homes", "holiday-homes", "holidayhomes",
+    # park home
+    "park home", "park-home", "parkhome", "park homes", "park-homes", "parkhomes",
+    # mobile home
+    "mobile home", "mobile-home", "mobilehome",
+    # caravan
     "caravan", "caravans",
-    "land",
-    "studio",
+    # not specified
     "not specified", "not-specified", "notspecified",
 ]
 
@@ -59,7 +64,7 @@ class RightmoveData:
     def __init__(self, url: str, get_floorplans: bool = False):
         self._status_code, self._first_page = self._request(url)
         self._url = url
-        # strict URL validation disabled for long, encoded URLs
+        # skip strict validation for long encoded URLs
         # self._validate_url()
         self._results = self._get_results(get_floorplans=get_floorplans)
 
@@ -139,10 +144,14 @@ class RightmoveData:
             ad = c.xpath(".//*[@data-testid='property-address']//address/text()")
             address = ad[0].strip() if ad else None
 
-            # property type
+            # property type with fallback
             tp = c.xpath(
                 ".//span[contains(@class,'PropertyInformation_propertyType')]/text()"
             )
+            if not tp:
+                tp = c.xpath(
+                    ".//div[@data-testid='property-information']//span/text()"
+                )
             ptype = tp[0].strip() if tp else None
 
             # beds
@@ -236,7 +245,7 @@ class RightmoveData:
     def _get_results(self, get_floorplans: bool) -> pd.DataFrame:
         df = self._get_page(self._first_page, get_floorplans)
         for p in range(1, self.page_count):
-            u   = f"{self._url}&index={p*24}"
+            u,idx = f"{self._url}&index={p*24}", p
             sc, ct = self._request(u)
             if sc != 200:
                 break
