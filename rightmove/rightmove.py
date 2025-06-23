@@ -1,5 +1,9 @@
+# cogs/rightmove/rightmove.py
+
 import datetime
 import time
+from datetime import time as dt_time
+from zoneinfo import ZoneInfo
 
 from lxml import html
 import numpy as np
@@ -10,12 +14,22 @@ import discord
 from discord.ext import tasks
 from redbot.core import commands
 
+# Schedule at 07:00 Europe/London daily
+LONDON      = ZoneInfo("Europe/London")
+SCRAPE_TIME = dt_time(hour=7, minute=0, tzinfo=LONDON)
+
+TARGET_PRICE = 250_000
+IDEAL_DELTA  = 3_000
+
+BANNED_TERMS = [
+    "leasehold", "lease hold", "shared ownership",
+    "over 50", "over50", "holiday home", "park home"
+]
+
 
 class RightmoveData:
-    """The `RightmoveData` webscraper collects structured data on properties
-    returned by a search performed on www.rightmove.co.uk.  (Your original
-    class, only _request and _get_page have been updated for the new markup.)"""
-
+    """Your original RightmoveData—only _request and _get_page are updated for the
+       new Next.js markup and to extract `type`."""
     def __init__(self, url: str, get_floorplans: bool = False):
         self._status_code, self._first_page = self._request(url)
         self._url = url
@@ -24,7 +38,6 @@ class RightmoveData:
 
     @staticmethod
     def _request(url: str):
-        # Send a real browser User-Agent so Rightmove returns the full HTML
         r = requests.get(
             url,
             headers={
@@ -56,110 +69,109 @@ class RightmoveData:
 
     @property
     def results_count_display(self):
-        """Total listings as displayed on the first page, or 0 if not found."""
         tree = html.fromstring(self._first_page)
-        # Look for the header span that contains the count
-        text = tree.xpath("//span[contains(@class,'searchHeader-resultCount')]/text()")
-        if not text:
+        txt = tree.xpath("//span[contains(@class,'searchHeader-resultCount')]/text()")
+        if not txt:
             return 0
         try:
-            return int(text[0].replace(",", ""))
+            return int(txt[0].replace(",", ""))
         except ValueError:
             return 0
 
     @property
     def page_count(self):
-        """Number of result pages (24 per page, max 42)."""
         total = self.results_count_display
         if total <= 24:
             return 1
         pages = total // 24 + (1 if total % 24 else 0)
         return min(pages, 42)
 
-    def _get_page(self, request_content: bytes, get_floorplans: bool = False):
-        """Scrape data from a single page, using the new data-testids and classes."""
-        tree = html.fromstring(request_content)
-
-        # Each card now has a data-testid="propertyCard-<index>"
+    def _get_page(self, content: bytes, get_floorplans: bool = False):
+        tree = html.fromstring(content)
+        # find all cards by data-testid
         cards = tree.xpath("//div[starts-with(@data-testid,'propertyCard-')]")
         rows = []
         base = "https://www.rightmove.co.uk"
 
         for c in cards:
-            # 1) Price
-            price = c.xpath(
-                ".//a[@data-testid='property-price']//div[contains(@class,'PropertyPrice_price__')]/text()"
+            # price
+            p = c.xpath(
+                ".//a[@data-testid='property-price']"
+                "//div[contains(@class,'PropertyPrice_price__')]/text()"
             )
-            raw_price = price[0].strip() if price else None
+            price_raw = p[0].strip() if p else None
 
-            # 2) Address
+            # address
             addr = c.xpath(".//*[@data-testid='property-address']//address/text()")
             address = addr[0].strip() if addr else None
 
-            # 3) Bedrooms
-            beds = c.xpath(
+            # type
+            t = c.xpath(".//span[contains(@class,'PropertyInformation_propertyType')]/text()")
+            prop_type = t[0].strip() if t else None
+
+            # bedrooms
+            b = c.xpath(
                 ".//span[contains(@class,'PropertyInformation_bedroomsCount')]/text()"
             )
             try:
-                number_bedrooms = int(beds[0]) if beds else None
+                beds = int(b[0]) if b else None
             except ValueError:
-                number_bedrooms = None
+                beds = None
 
-            # 4) Property details URL
-            prop = c.xpath(".//a[@data-test='property-details']/@href")
-            prop_url = f"{base}{prop[0]}" if prop else None
+            # link
+            href = c.xpath(".//a[@data-test='property-details']/@href")
+            url = f"{base}{href[0]}" if href else None
 
-            # 5) Agent name & URL
+            # agent & agent_url
             an = c.xpath(
-                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]//img/@alt"
+                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]"
+                "//img/@alt"
             )
-            agent = an[0].replace(" Estate Agent Logo", "").strip() if an else None
+            agent = (
+                an[0].replace(" Estate Agent Logo", "").strip() if an else None
+            )
             au = c.xpath(
-                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]//a/@href"
+                ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]"
+                "//a/@href"
             )
             agent_url = f"{base}{au[0]}" if au else None
 
             rows.append({
-                "price": raw_price,
+                "price": price_raw,
                 "address": address,
-                "number_bedrooms": number_bedrooms,
-                "url": prop_url,
+                "type": prop_type,
+                "number_bedrooms": beds,
+                "url": url,
                 "agent": agent,
                 "agent_url": agent_url,
             })
 
         df = pd.DataFrame(rows)
-        return self._clean_results(df)
-
-    def _get_results(self, get_floorplans: bool = False):
-        """Build a DataFrame with all pages of results."""
-        results = self._get_page(self._first_page, get_floorplans=get_floorplans)
-        for p in range(1, self.page_count):
-            page_url = f"{self.url}&index={p*24}"
-            sc, content = self._request(page_url)
-            if sc != 200:
-                break
-            temp_df = self._get_page(content, get_floorplans=get_floorplans)
-            results = pd.concat([results, temp_df], ignore_index=True)
-        return results
-
-    @staticmethod
-    def _clean_results(df: pd.DataFrame):
-        # Convert price to numeric
+        # clean & convert price, drop bad rows
         df["price"] = (
             df["price"]
             .replace(r"\D+", "", regex=True)
             .replace("", np.nan)
             .astype(float)
         )
-        # Drop rows missing price or address
-        df = df.dropna(subset=["price", "address"])
+        df = df.dropna(subset=["price", "address", "type"])
         df.reset_index(drop=True, inplace=True)
+        return df
+
+    def _get_results(self, get_floorplans: bool = False):
+        df = self._get_page(self._first_page, get_floorplans)
+        for p in range(1, self.page_count):
+            page_url = f"{self.url}&index={p*24}"
+            sc, content = self._request(page_url)
+            if sc != 200:
+                break
+            tmp = self._get_page(content, get_floorplans)
+            df = pd.concat([df, tmp], ignore_index=True)
         return df
 
 
 class RightmoveCog(commands.Cog):
-    """Redbot cog to start/stop daily Rightmove scraping."""
+    """Redbot cog to scrape Rightmove once daily at 07:00 London time."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -174,32 +186,27 @@ class RightmoveCog(commands.Cog):
     @commands.command(name="start-scrape")
     async def start_scrape(self, ctx, channel: discord.TextChannel = None):
         """
-        Start the daily Rightmove scrape.
+        Start the daily scrape at 07:00 Europe/London.
         Optionally specify a channel; otherwise uses this one.
         """
         if self.scrape_loop and self.scrape_loop.is_running():
             return await ctx.send("❌ Scrape already running.")
         self.target_channel = channel or ctx.channel
-
-        # Do an immediate scrape:
-        await self.do_scrape()
-        # Then schedule every 24h:
-        self.scrape_loop = tasks.loop(hours=24)(self.do_scrape)
+        # schedule daily
+        self.scrape_loop = tasks.loop(time=SCRAPE_TIME)(self.do_scrape)
         self.scrape_loop.start()
-
-        await ctx.send(f"✅ Started scraping. Posting to {self.target_channel.mention}")
+        await ctx.send(f"✅ Started daily scraping at 07:00 London time. Posting to {self.target_channel.mention}")
 
     @commands.is_owner()
     @commands.command(name="stop-scrape")
     async def stop_scrape(self, ctx):
-        """Stop the daily Rightmove scrape."""
+        """Stop the daily scrape."""
         if not self.scrape_loop or not self.scrape_loop.is_running():
             return await ctx.send("❌ Scrape is not running.")
         self.scrape_loop.cancel()
-        await ctx.send("✅ Stopped scraping.")
+        await ctx.send("✅ Scrape stopped.")
 
     async def do_scrape(self):
-        # ← your 14-day URL here:
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
             "sortType=1&viewType=LIST&channel=BUY"
@@ -214,30 +221,48 @@ class RightmoveCog(commands.Cog):
             "&dontShow=newHome%2Cretirement%2CsharedOwnership%2Cauction"
             "&maxDaysSinceAdded=14"
         )
-
-        ts = int(time.time())
         df = RightmoveData(url).get_results
 
-        embed = discord.Embed(
-            title="📈 New Rightmove Listings (past 14 days)",
-            description=f"Scraped at <t:{ts}:F> (<t:{ts}:R>)",
-            color=discord.Color.blue(),
-        )
+        # filter out banned terms in `type`
+        mask = False
+        for term in BANNED_TERMS:
+            mask |= df["type"].str.lower().str.contains(term, na=False)
+        df = df[~mask].reset_index(drop=True)
 
-        if df.empty:
-            embed.add_field(name="No new listings", value="None found.")
-        else:
-            # One field per listing
-            for _, row in df.iterrows():
-                embed.add_field(
-                    name=row["address"],
-                    value=(
-                        f"💷 **£{int(row['price']):,}**\n"
-                        f"🛏 **{row['number_bedrooms']}** beds\n"
-                        f"🏠 [View listing]({row['url']})\n"
-                        f"🔗 [Agent page]({row['agent_url']})"
-                    ),
-                    inline=False,
+        # now one embed per property
+        for _, r in df.iterrows():
+            price = r["price"]
+            # color logic
+            if abs(price - TARGET_PRICE) <= IDEAL_DELTA:
+                color = discord.Color.from_rgb(173, 216, 230)  # light blue
+            elif price <= 170_000:
+                color = discord.Color.green()
+            elif price <= 220_000:
+                color = discord.Color.orange()
+            else:
+                color = discord.Color.red()
+
+            # first send the plain URL for preview
+            await self.target_channel.send(r["url"])
+
+            # build the embed
+            em = discord.Embed(
+                title=r["address"],
+                color=color,
+                url=r["url"],
+            )
+            em.add_field(name="💷 Price", value=f"£{int(price):,}", inline=True)
+            em.add_field(name="🛏 Bedrooms", value=str(r["number_bedrooms"]), inline=True)
+            em.add_field(name="🏠 Type", value=r["type"], inline=True)
+            if r["agent"] and r["agent_url"]:
+                em.add_field(
+                    name="🔗 Agent",
+                    value=f"[{r['agent']}]({r['agent_url']})",
+                    inline=True,
                 )
+            await self.target_channel.send(embed=em)
 
-        await self.target_channel.send(embed=embed)
+    @tasks.loop(time=SCRAPE_TIME)
+    async def scrape_loop(self):
+        # this is replaced by start_scrape; never used directly
+        pass
