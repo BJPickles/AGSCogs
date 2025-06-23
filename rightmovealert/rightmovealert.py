@@ -7,13 +7,20 @@ import discord
 from discord.ext import tasks
 from redbot.core import commands, Config
 
-from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse, quote, unquote
+from urllib.parse import (
+    urlsplit,
+    parse_qsl,
+    urlunsplit,
+    quote,
+    unquote,
+)
 
 from .scraper import RightmoveScraper, CaptchaError
 from .filter_utils import filter_listings
 
 # Silence Playwright debug spam
 logging.getLogger("playwright").setLevel(logging.CRITICAL)
+
 
 class RightmoveAlert(commands.Cog):
     """Alert guilds of new Rightmove listings from a fixed search URL."""
@@ -23,7 +30,7 @@ class RightmoveAlert(commands.Cog):
         self.scraper = RightmoveScraper()
         self.tz = pytz.timezone("Europe/London")
 
-        # Per-guild settings
+        # per-guild settings
         guild_defaults = {
             "search_url": None,
             "alert_channel": None,
@@ -36,7 +43,7 @@ class RightmoveAlert(commands.Cog):
             "blacklistleasehold": True,
             "seen": []
         }
-        # Global metrics
+        # global metrics
         global_defaults = {
             "listings_checked": 0,
             "matched": 0,
@@ -50,14 +57,13 @@ class RightmoveAlert(commands.Cog):
         self.config.register_guild(**guild_defaults)
         self.config.register_global(**global_defaults)
 
-        # Limit concurrent Playwright pages
+        # semaphore for concurrent scrapes
         self.scrape_sem = asyncio.Semaphore(3)
         self._startup_logged = False
 
     async def cog_load(self):
         self.scraping_loop.start()
         self.daily_summary.start()
-        # Delay a startup log until the bot is fully ready
         self.bot.loop.create_task(self._delayed_startup_log())
 
     async def _delayed_startup_log(self):
@@ -75,11 +81,11 @@ class RightmoveAlert(commands.Cog):
     @tasks.loop(seconds=600)
     async def scraping_loop(self):
         """
-        Every 10 minutes:
-          1) Fetch each guild’s URL
-          2) Scrape via Playwright
-          3) Apply filters (maxprice, minbeds, keywords, etc.)
-          4) Alert all new matches
+        Every 10 minutes:
+         1) load each guild’s URL
+         2) scrape via Playwright
+         3) apply filters
+         4) alert all new listings
         """
         for guild in self.bot.guilds:
             cfg = await self.config.guild(guild).all()
@@ -90,7 +96,6 @@ class RightmoveAlert(commands.Cog):
 
             seen = set(cfg.get("seen", []))
 
-            # Bound the number of simultaneous Playwright pages
             async with self.scrape_sem:
                 try:
                     listings = await self.scraper.scrape_url(url)
@@ -101,50 +106,50 @@ class RightmoveAlert(commands.Cog):
                     await self.log_event(f"Error scraping guild {guild.id}: {e}")
                     continue
 
-            # Update global counters
+            # update global counters
             async with getattr(self.config, "global")() as g:
                 g["listings_checked"] += len(listings)
 
-            # Apply filter_utils
+            # filter them
             matches, blocked = filter_listings(listings, cfg)
             async with getattr(self.config, "global")() as g:
                 g["matched"] += len(matches)
                 g["blocked"] += blocked
 
-            # Determine brand-new matches
-            new_listings = [l for l in matches if l["id"] not in seen]
+            # pick only brand‐new
+            new_listings = [L for L in matches if L["id"] not in seen]
             if not new_listings:
                 continue
 
-            # Persist seen and increment alert count
-            seen.update(l["id"] for l in new_listings)
+            # persist seen & increment alerts
+            seen.update(L["id"] for L in new_listings)
             await self.config.guild(guild).seen.set(list(seen))
             async with getattr(self.config, "global")() as g:
                 g["alerts"] += len(new_listings)
 
-            # Send each new listing
+            # send each
             for listing in new_listings:
                 await self.handle_listing(guild, listing)
 
     @tasks.loop(time=datetime.time(hour=23, minute=59))
     async def daily_summary(self):
-        """Every day at 23:59, post a summary embed to each guild’s summary channel."""
+        """Post a daily summary each 23:59."""
         now_ts = int(datetime.datetime.now(self.tz).timestamp())
         g      = await getattr(self.config, "global")()
         scrps  = g.get("listings_checked", 0)
-        matched = g.get("matched", 0)
-        blocked = g.get("blocked", 0)
-        alerts  = g.get("alerts", 0)
+        matched= g.get("matched", 0)
+        blocked= g.get("blocked", 0)
+        alerts = g.get("alerts", 0)
 
         embed = discord.Embed(title="Rightmove Daily Summary")
-        embed.add_field(name="Scrapes Run",          value=str(scrps),  inline=True)
-        embed.add_field(name="Listings Matched",     value=str(matched), inline=True)
+        embed.add_field(name="Scrapes Run", value=str(scrps), inline=True)
+        embed.add_field(name="Listings Matched", value=str(matched), inline=True)
         embed.add_field(name="Blocked by Blacklist", value=str(blocked), inline=True)
-        embed.add_field(name="Alerts Sent",          value=str(alerts), inline=True)
+        embed.add_field(name="Alerts Sent", value=str(alerts), inline=True)
         embed.add_field(
             name="Generated",
             value=f"<t:{now_ts}:F> (<t:{now_ts}:R>)",
-            inline=False,
+            inline=False
         )
 
         for guild in self.bot.guilds:
@@ -157,15 +162,15 @@ class RightmoveAlert(commands.Cog):
                     except:
                         pass
 
-        # Reset counters
+        # reset
         async with getattr(self.config, "global")() as g2:
             g2["listings_checked"] = 0
-            g2["matched"]          = 0
-            g2["blocked"]          = 0
-            g2["alerts"]           = 0
+            g2["matched"] = 0
+            g2["blocked"] = 0
+            g2["alerts"] = 0
 
     async def log_event(self, message: str):
-        """Send a timestamped log to every guild’s log channel (if configured)."""
+        """Log to each guild’s log_channel."""
         now_ts = int(datetime.datetime.now(self.tz).timestamp())
         full   = f"{message} — <t:{now_ts}:F> (<t:{now_ts}:R>)"
         for guild in self.bot.guilds:
@@ -179,22 +184,20 @@ class RightmoveAlert(commands.Cog):
                         pass
 
     async def handle_listing(self, guild, listing: dict):
-        """
-        Build and send one listing embed into the guild’s alert channel.
-        """
+        """Build & send one listing embed."""
         ts = int(datetime.datetime.now(self.tz).timestamp())
         embed = discord.Embed(
             title=listing["title"],
             url=listing["url"],
-            timestamp=datetime.datetime.fromtimestamp(ts, tz=self.tz),
+            timestamp=datetime.datetime.fromtimestamp(ts, tz=self.tz)
         )
         embed.add_field(name="Price", value=f"£{listing['price']}", inline=True)
-        embed.add_field(name="Beds",  value=str(listing["beds"]),    inline=True)
+        embed.add_field(name="Beds",  value=str(listing["beds"]), inline=True)
         embed.add_field(name="Location", value=listing["location"], inline=False)
         embed.add_field(
             name="Scraped At",
             value=f"<t:{ts}:F> (<t:{ts}:R>)",
-            inline=False,
+            inline=False
         )
 
         ac = await self.config.guild(guild).alert_channel()
@@ -217,34 +220,29 @@ class RightmoveAlert(commands.Cog):
 
     @rmalert.group(name="set", invoke_without_command=True)
     async def set(self, ctx):
-        """Configure your search URL, filters, and channels."""
+        """Configure your search URL, filters & channels."""
         await ctx.send_help()
 
     @set.command(name="url")
     @commands.guild_only()
     async def set_url(self, ctx, *, url: str):
         """
-        Set your Rightmove URL, auto-fixing any double-encoded locationIdentifier.
+        Set your Rightmove search URL.
+        Auto‐fixes any double‐encoded locationIdentifier.
         """
-        # parse the URL into components
-        parts = urlparse(url)
-        # turn query into a list of (k,v)
-        qsl = parse_qsl(parts.query, keep_blank_values=True)
-        new_qsl = []
-        for k, v in qsl:
+        parts = urlsplit(url)
+        qpairs = parse_qsl(parts.query, keep_blank_values=True)
+        new_q = []
+        for k, v in qpairs:
             if k == "locationIdentifier":
-                # decode any stray % escapes twice
-                decoded = unquote(unquote(v))
-                # encode it exactly once (so ^ -> %5E, " -> %22, etc.)
-                fixed = quote(decoded, safe="")
-                new_qsl.append((k, fixed))
+                # decode twice then encode once
+                raw = unquote(unquote(v))
+                val = quote(raw, safe="")
             else:
-                new_qsl.append((k, v))
-        # rebuild the query string
-        new_query = urlencode(new_qsl)
-        # reconstruct a full URL
-        safe_url = urlunparse(parts._replace(query=new_query))
-        # save it
+                val = v
+            new_q.append((k, val))
+        safe_query = "&".join(f"{k}={val}" for k, val in new_q)
+        safe_url = urlunsplit((parts.scheme, parts.netloc, parts.path, safe_query, parts.fragment))
         await self.config.guild(ctx.guild).search_url.set(safe_url)
         await ctx.send(f"🔗 Search URL set to:\n`{safe_url}`")
 
@@ -252,17 +250,16 @@ class RightmoveAlert(commands.Cog):
     @commands.guild_only()
     async def set_maxprice(self, ctx, amount: str):
         """
-        Set the maximum price filter, or clear it by passing 'none'.
-        Usage:
-          • [p]rmalert set maxprice 175000
-          • [p]rmalert set maxprice none
+        Set maximum price, or clear with 'none'.
+        [p]rmalert set maxprice 175000
+        [p]rmalert set maxprice none
         """
         val = amount.strip().lower()
         if val in ("none", "clear", "null"):
             await self.config.guild(ctx.guild).maxprice.clear()
             return await ctx.send("✅ Cleared max-price filter (now unlimited).")
         if not val.isdigit():
-            return await ctx.send("❌ Supply a number (e.g. 175000) or the word `none`.")
+            return await ctx.send("❌ Supply a number or the word `none`.")
         num = int(val)
         await self.config.guild(ctx.guild).maxprice.set(num)
         await ctx.send(f"✅ Max price set to £{num}.")
@@ -271,17 +268,16 @@ class RightmoveAlert(commands.Cog):
     @commands.guild_only()
     async def set_minbeds(self, ctx, count: str):
         """
-        Set the minimum bedrooms filter, or clear it by passing 'none'.
-        Usage:
-          • [p]rmalert set minbeds 2
-          • [p]rmalert set minbeds none
+        Set minimum beds, or clear with 'none'.
+        [p]rmalert set minbeds 2
+        [p]rmalert set minbeds none
         """
         val = count.strip().lower()
         if val in ("none", "clear", "null"):
             await self.config.guild(ctx.guild).minbeds.clear()
-            return await ctx.send("✅ Cleared min-beds filter (now no minimum).")
+            return await ctx.send("✅ Cleared min-beds filter (no minimum).")
         if not val.isdigit():
-            return await ctx.send("❌ Supply a number (e.g. 2) or the word `none`.")
+            return await ctx.send("❌ Supply a number or the word `none`.")
         num = int(val)
         await self.config.guild(ctx.guild).minbeds.set(num)
         await ctx.send(f"✅ Min beds set to {num}.")
@@ -289,7 +285,7 @@ class RightmoveAlert(commands.Cog):
     @set.command(name="keyword")
     @commands.guild_only()
     async def set_keyword(self, ctx, *, keyword: str):
-        """Set a single whitelist keyword (resets the list)."""
+        """Set one whitelist keyword (resets the list)."""
         k = keyword.lower().strip()
         await self.config.guild(ctx.guild).keywords.set([k])
         await ctx.send(f"✅ Whitelist keyword set to `{k}`.")
@@ -297,7 +293,7 @@ class RightmoveAlert(commands.Cog):
     @set.command(name="customblacklist")
     @commands.guild_only()
     async def set_customblacklist(self, ctx, *, items: str):
-        """Set a comma-separated custom blacklist (replaces existing)."""
+        """Set comma-separated custom blacklist."""
         terms = [t.lower().strip() for t in items.split(",") if t.strip()]
         await self.config.guild(ctx.guild).customblacklist.set(terms)
         await ctx.send(f"✅ Custom blacklist set to: `{', '.join(terms)}`")
@@ -305,64 +301,59 @@ class RightmoveAlert(commands.Cog):
     @set.command(name="blacklistleasehold")
     @commands.guild_only()
     async def set_blacklistleasehold(self, ctx, toggle: bool):
-        """Toggle blocking of leasehold listings."""
+        """Toggle leasehold blacklist."""
         await self.config.guild(ctx.guild).blacklistleasehold.set(toggle)
         await ctx.send(f"✅ Blacklist leasehold set to {toggle}.")
 
     @set.group(name="channels", invoke_without_command=True)
     async def set_channels(self, ctx):
-        """Configure alert, log & summary channels."""
         await ctx.send_help()
 
     @set_channels.command(name="alert")
     @commands.guild_only()
     async def set_channel_alert(self, ctx, channel: discord.TextChannel):
-        """Set the channel where new listings will be posted."""
+        """Set the alert channel."""
         await self.config.guild(ctx.guild).alert_channel.set(channel.id)
         await ctx.send(f"✅ Alert channel set to {channel.mention}")
 
     @set_channels.command(name="log")
     @commands.guild_only()
     async def set_channel_log(self, ctx, channel: discord.TextChannel):
-        """Set the channel where internal logs will be sent."""
+        """Set the log channel."""
         await self.config.guild(ctx.guild).log_channel.set(channel.id)
         await ctx.send(f"✅ Log channel set to {channel.mention}")
 
     @set_channels.command(name="summary")
     @commands.guild_only()
     async def set_channel_summary(self, ctx, channel: discord.TextChannel):
-        """Set the channel for the daily summary."""
+        """Set the summary channel."""
         await self.config.guild(ctx.guild).summary_channel.set(channel.id)
         await ctx.send(f"✅ Summary channel set to {channel.mention}")
 
     @rmalert.command()
     async def test(self, ctx):
         """
-        One-off: scrape your URL, filter *all* matches, and deliver them
-        so you can verify filters/layout.
+        One-off: scrape your URL, filter *all* matches, and deliver them.
         """
         cfg = await self.config.guild(ctx.guild).all()
         url = cfg.get("search_url")
         ac  = cfg.get("alert_channel")
         if not url or not ac:
             return await ctx.send("⚠️ Please set both the URL and an alert channel first.")
-
         try:
             listings = await self.scraper.scrape_url(url)
         except Exception as e:
             return await ctx.send(f"❌ Scrape error: {e}")
-
         matches, _ = filter_listings(listings, cfg)
         if not matches:
             return await ctx.send("ℹ️ No matching listings found for test.")
-
         for L in matches:
             await self.handle_listing(ctx.guild, L)
         await ctx.send(f"✅ Test delivered {len(matches)} listing(s).")
 
     @rmalert.command()
     async def status(self, ctx):
-        """Show this guild’s current settings."""
+        """Show this guild’s settings."""
         cfg = await self.config.guild(ctx.guild).all()
         embed = discord.Embed(title=f"{ctx.guild.name} – Rightmove Status")
         embed.add_field(name="Search URL", value=cfg.get("search_url") or "None", inline=False)
