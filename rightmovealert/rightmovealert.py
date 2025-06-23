@@ -118,8 +118,7 @@ class RightmoveAlert(commands.Cog):
                             for listing in new:
                                 await self.handle_listing(uid, listing)
                                 seen.add(listing["id"])
-                            async with self.config.user(uid) as u:
-                                u['seen'] = list(seen)
+                            await self.config.user(uid).seen.set(list(seen))
                             async with getattr(self.config, "global")() as g:
                                 ua = g.get('user_alerts', {})
                                 ua[str(uid)] = ua.get(str(uid), 0) + len(new)
@@ -316,24 +315,22 @@ class RightmoveAlert(commands.Cog):
     async def keywords_add(self, ctx, *, keyword: str):
         """Add a keyword to your whitelist."""
         kw = keyword.lower().strip()
-        async with self.config.user(ctx.author) as u:
-            kws = u.get("keywords", [])
-            if kw in kws:
-                return await ctx.send(f"'{kw}' is already in your whitelist.")
-            kws.append(kw)
-            u["keywords"] = kws
+        kws = await self.config.user(ctx.author).keywords()
+        if kw in kws:
+            return await ctx.send(f"'{kw}' is already in your whitelist.")
+        kws.append(kw)
+        await self.config.user(ctx.author).keywords.set(kws)
         await ctx.send(f"Whitelist keyword added: '{kw}'.")
 
     @keywords.command(name="remove")
     async def keywords_remove(self, ctx, *, keyword: str):
         """Remove a keyword from your whitelist."""
         kw = keyword.lower().strip()
-        async with self.config.user(ctx.author) as u:
-            kws = u.get("keywords", [])
-            if kw not in kws:
-                return await ctx.send(f"'{kw}' not found in your whitelist.")
-            kws.remove(kw)
-            u["keywords"] = kws
+        kws = await self.config.user(ctx.author).keywords()
+        if kw not in kws:
+            return await ctx.send(f"'{kw}' not found in your whitelist.")
+        kws.remove(kw)
+        await self.config.user(ctx.author).keywords.set(kws)
         await ctx.send(f"Whitelist keyword removed: '{kw}'.")
 
     @keywords.command(name="clear")
@@ -359,24 +356,22 @@ class RightmoveAlert(commands.Cog):
     async def customblacklist_add(self, ctx, *, term: str):
         """Add a term to your custom blacklist."""
         term_l = term.lower().strip()
-        async with self.config.user(ctx.author) as u:
-            bl = u.get("customblacklist", [])
-            if term_l in bl:
-                return await ctx.send(f"'{term_l}' is already in your custom blacklist.")
-            bl.append(term_l)
-            u["customblacklist"] = bl
+        bl = await self.config.user(ctx.author).customblacklist()
+        if term_l in bl:
+            return await ctx.send(f"'{term_l}' is already in your custom blacklist.")
+        bl.append(term_l)
+        await self.config.user(ctx.author).customblacklist.set(bl)
         await ctx.send(f"Custom blacklist term added: '{term_l}'.")
 
     @customblacklist.command(name="remove")
     async def customblacklist_remove(self, ctx, *, term: str):
         """Remove a term from your custom blacklist."""
         term_l = term.lower().strip()
-        async with self.config.user(ctx.author) as u:
-            bl = u.get("customblacklist", [])
-            if term_l not in bl:
-                return await ctx.send(f"'{term_l}' not found in your custom blacklist.")
-            bl.remove(term_l)
-            u["customblacklist"] = bl
+        bl = await self.config.user(ctx.author).customblacklist()
+        if term_l not in bl:
+            return await ctx.send(f"'{term_l}' not found in your custom blacklist.")
+        bl.remove(term_l)
+        await self.config.user(ctx.author).customblacklist.set(bl)
         await ctx.send(f"Custom blacklist term removed: '{term_l}'.")
 
     @customblacklist.command(name="clear")
