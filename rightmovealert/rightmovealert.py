@@ -225,19 +225,43 @@ class RightmoveAlert(commands.Cog):
         await self.config.guild(ctx.guild).search_url.set(url)
         await ctx.send(f"🔗 Search URL set to:\n`{url}`")
 
-    @set.command(name="maxprice")
+        @set.command(name="maxprice")
     @commands.guild_only()
-    async def set_maxprice(self, ctx, amount: int):
-        """Set the maximum price filter."""
-        await self.config.guild(ctx.guild).maxprice.set(amount)
-        await ctx.send(f"Max price set to £{amount}.")
+    async def set_maxprice(self, ctx, amount: str):
+        """
+        Set the maximum price filter, or clear it by passing 'none'.
+        Usage:
+          • [p]rmalert set maxprice 175000
+          • [p]rmalert set maxprice none
+        """
+        a = amount.lower().strip()
+        if a in ("none", "clear", "null"):
+            await self.config.guild(ctx.guild).maxprice.clear()
+            return await ctx.send("✅ Max price filter cleared.")
+        if not a.isdigit():
+            return await ctx.send("❌ Please supply a number or `none`.")
+        amt = int(a)
+        await self.config.guild(ctx.guild).maxprice.set(amt)
+        await ctx.send(f"✅ Max price set to £{amt}.")
 
     @set.command(name="minbeds")
     @commands.guild_only()
-    async def set_minbeds(self, ctx, count: int):
-        """Set the minimum bedrooms filter."""
-        await self.config.guild(ctx.guild).minbeds.set(count)
-        await ctx.send(f"Min beds set to {count}.")
+    async def set_minbeds(self, ctx, count: str):
+        """
+        Set the minimum bedrooms filter, or clear it by passing 'none'.
+        Usage:
+          • [p]rmalert set minbeds 2
+          • [p]rmalert set minbeds none
+        """
+        c = count.lower().strip()
+        if c in ("none", "clear", "null"):
+            await self.config.guild(ctx.guild).minbeds.clear()
+            return await ctx.send("✅ Min beds filter cleared.")
+        if not c.isdigit():
+            return await ctx.send("❌ Please supply a number or `none`.")
+        mb = int(c)
+        await self.config.guild(ctx.guild).minbeds.set(mb)
+        await ctx.send(f"✅ Min beds set to {mb}.")
 
     @set.command(name="keyword")
     @commands.guild_only()
