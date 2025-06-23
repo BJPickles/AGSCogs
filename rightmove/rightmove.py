@@ -1,5 +1,3 @@
-# cogs/rightmove/rightmove.py
-
 import datetime
 import time
 from datetime import time as dt_time
@@ -14,7 +12,7 @@ import discord
 from discord.ext import tasks
 from redbot.core import commands
 
-# Schedule at 07:00 Europe/London daily
+# 07:00 Europe/London
 LONDON      = ZoneInfo("Europe/London")
 SCRAPE_TIME = dt_time(hour=7, minute=0, tzinfo=LONDON)
 
@@ -28,8 +26,12 @@ BANNED_TERMS = [
 
 
 class RightmoveData:
-    """Your original RightmoveData—only _request and _get_page are updated for the
-       new Next.js markup and to extract `type`."""
+    """
+    Unchanged except:
+     - _request now uses a real-browser User-Agent
+     - _get_page updated for the new React/Next.js markup and to extract `type`
+    """
+
     def __init__(self, url: str, get_floorplans: bool = False):
         self._status_code, self._first_page = self._request(url)
         self._url = url
@@ -88,7 +90,6 @@ class RightmoveData:
 
     def _get_page(self, content: bytes, get_floorplans: bool = False):
         tree = html.fromstring(content)
-        # find all cards by data-testid
         cards = tree.xpath("//div[starts-with(@data-testid,'propertyCard-')]")
         rows = []
         base = "https://www.rightmove.co.uk"
@@ -106,7 +107,9 @@ class RightmoveData:
             address = addr[0].strip() if addr else None
 
             # type
-            t = c.xpath(".//span[contains(@class,'PropertyInformation_propertyType')]/text()")
+            t = c.xpath(
+                ".//span[contains(@class,'PropertyInformation_propertyType')]/text()"
+            )
             prop_type = t[0].strip() if t else None
 
             # bedrooms
@@ -118,7 +121,7 @@ class RightmoveData:
             except ValueError:
                 beds = None
 
-            # link
+            # details URL
             href = c.xpath(".//a[@data-test='property-details']/@href")
             url = f"{base}{href[0]}" if href else None
 
@@ -127,9 +130,7 @@ class RightmoveData:
                 ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]"
                 "//img/@alt"
             )
-            agent = (
-                an[0].replace(" Estate Agent Logo", "").strip() if an else None
-            )
+            agent = an[0].replace(" Estate Agent Logo", "").strip() if an else None
             au = c.xpath(
                 ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]"
                 "//a/@href"
@@ -147,7 +148,6 @@ class RightmoveData:
             })
 
         df = pd.DataFrame(rows)
-        # clean & convert price, drop bad rows
         df["price"] = (
             df["price"]
             .replace(r"\D+", "", regex=True)
@@ -171,7 +171,7 @@ class RightmoveData:
 
 
 class RightmoveCog(commands.Cog):
-    """Redbot cog to scrape Rightmove once daily at 07:00 London time."""
+    """Scrapes Rightmove daily at 07:00 London time and posts one embed per property."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -186,16 +186,22 @@ class RightmoveCog(commands.Cog):
     @commands.command(name="start-scrape")
     async def start_scrape(self, ctx, channel: discord.TextChannel = None):
         """
-        Start the daily scrape at 07:00 Europe/London.
+        Start daily scraping at 07:00 Europe/London.
         Optionally specify a channel; otherwise uses this one.
+        Posts immediately, then schedules.
         """
         if self.scrape_loop and self.scrape_loop.is_running():
             return await ctx.send("❌ Scrape already running.")
         self.target_channel = channel or ctx.channel
-        # schedule daily
+
+        # Immediate first run:
+        await self.do_scrape()
+
+        # Then schedule at 07:00 London time daily:
         self.scrape_loop = tasks.loop(time=SCRAPE_TIME)(self.do_scrape)
         self.scrape_loop.start()
-        await ctx.send(f"✅ Started daily scraping at 07:00 London time. Posting to {self.target_channel.mention}")
+
+        await ctx.send(f"✅ Started daily scraping (immediate + 07:00 London). Posting to {self.target_channel.mention}")
 
     @commands.is_owner()
     @commands.command(name="stop-scrape")
@@ -223,16 +229,15 @@ class RightmoveCog(commands.Cog):
         )
         df = RightmoveData(url).get_results
 
-        # filter out banned terms in `type`
+        # filter out banned terms
         mask = False
         for term in BANNED_TERMS:
             mask |= df["type"].str.lower().str.contains(term, na=False)
         df = df[~mask].reset_index(drop=True)
 
-        # now one embed per property
         for _, r in df.iterrows():
             price = r["price"]
-            # color logic
+            # colour logic
             if abs(price - TARGET_PRICE) <= IDEAL_DELTA:
                 color = discord.Color.from_rgb(173, 216, 230)  # light blue
             elif price <= 170_000:
@@ -242,10 +247,10 @@ class RightmoveCog(commands.Cog):
             else:
                 color = discord.Color.red()
 
-            # first send the plain URL for preview
+            # 1) plain URL for preview
             await self.target_channel.send(r["url"])
 
-            # build the embed
+            # 2) embed
             em = discord.Embed(
                 title=r["address"],
                 color=color,
@@ -264,5 +269,5 @@ class RightmoveCog(commands.Cog):
 
     @tasks.loop(time=SCRAPE_TIME)
     async def scrape_loop(self):
-        # this is replaced by start_scrape; never used directly
+        # never called directly; replaced by start_scrape
         pass
