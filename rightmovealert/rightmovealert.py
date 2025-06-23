@@ -72,6 +72,7 @@ class RightmoveAlert(commands.Cog):
             for uid, data in enabled.items():
                 area = data.get("area")
                 area_map.setdefault(area, []).append((uid, data))
+
             async def process_area(area, user_list):
                 async with self.scrape_sem:
                     try:
@@ -89,8 +90,10 @@ class RightmoveAlert(commands.Cog):
                         delay = min((2 ** self.scraper.backoff_count) * 10, 600)
                         await asyncio.sleep(delay)
                         return
+
                     async with getattr(self.config, "global")() as g:
                         g['listings_checked'] += len(listings)
+
                     for uid, data in user_list:
                         if not now_in_windows(data.get("active_hours")):
                             continue
@@ -114,13 +117,15 @@ class RightmoveAlert(commands.Cog):
                                 g['user_alerts'] = ua
                         except Exception as e:
                             await self.log_event(f"Error processing user {uid} listings: {e}")
+
             tasks_list = [asyncio.create_task(process_area(area, ul)) for area, ul in area_map.items()]
             if tasks_list:
                 await asyncio.gather(*tasks_list)
+
         except Exception as e:
             await self.log_event(f"Error in scraping loop: {e}")
 
-    @tasks.loop(time=datetime.time(hour=23, minute=59), timezone=pytz.timezone('Europe/London'))
+    @tasks.loop(time=datetime.time(hour=23, minute=59))
     async def daily_summary(self):
         try:
             g = await getattr(self.config, "global")()
@@ -134,6 +139,7 @@ class RightmoveAlert(commands.Cog):
             embed.add_field(name="Listings Matched", value=str(matched), inline=True)
             embed.add_field(name="Blocked by Blacklist", value=str(blocked), inline=True)
             embed.add_field(name="Unique Users Alerted", value=str(unique_users), inline=True)
+
             for guild in self.bot.guilds:
                 cfg = await self.config.guild(guild).all()
                 ch_id = cfg.get("summary_channel")
@@ -144,6 +150,7 @@ class RightmoveAlert(commands.Cog):
                             await ch.send(embed=embed)
                         except:
                             pass
+
             async with getattr(self.config, "global")() as g2:
                 g2['listings_checked'] = 0
                 g2['matched'] = 0
@@ -167,7 +174,11 @@ class RightmoveAlert(commands.Cog):
                         pass
 
     async def handle_listing(self, uid: int, listing: dict):
-        embed = discord.Embed(title=listing.get("title", "Listing"), url=listing.get("url"), timestamp=datetime.datetime.now(self.tz))
+        embed = discord.Embed(
+            title=listing.get("title", "Listing"),
+            url=listing.get("url"),
+            timestamp=datetime.datetime.now(self.tz)
+        )
         embed.add_field(name="Price", value=f"£{listing.get('price')}", inline=True)
         embed.add_field(name="Beds", value=str(listing.get('beds')), inline=True)
         embed.add_field(name="Location", value=listing.get('location', "Unknown"), inline=False)
@@ -175,6 +186,7 @@ class RightmoveAlert(commands.Cog):
         filename = f"{listing.get('id')}.png" if file_bytes else None
         if file_bytes:
             embed.set_image(url=f"attachment://{filename}")
+
         user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
         if user:
             try:
@@ -185,6 +197,7 @@ class RightmoveAlert(commands.Cog):
                     await user.send(embed=embed)
             except:
                 await self.log_event(f"Failed to DM user {uid}")
+
         for guild in self.bot.guilds:
             member = guild.get_member(uid)
             if member:
