@@ -12,9 +12,6 @@ from redbot.core import commands, Config
 from .scraper import RightmoveScraper, CaptchaError
 from .filter_utils import seconds_until_next_scrape, filter_listings, now_in_windows
 
-# DEBUG: show what filter_listings really is
-print("filter_listings ->", filter_listings, type(filter_listings))
-
 logging.getLogger('playwright').setLevel(logging.CRITICAL)
 
 
@@ -431,18 +428,21 @@ class RightmoveAlert(commands.Cog):
     async def test(self, ctx):
         """Run a test scrape and send a sample alert if a match is found."""
         data = await self.config.user(ctx.author).all()
-        if not data.get("area"):
-            return await ctx.send("Please set your area first.")
         try:
+            print("TEST data ->", data, type(data))
             listings = await self.scraper.scrape_area(data.get("area"))
+            print("TEST listings ->", listings[:2], type(listings))
             matches, _ = filter_listings(listings, data)
+            print("TEST matches ->", matches[:2], type(matches))
             if matches:
                 await self.handle_listing(ctx.author.id, matches[0])
                 await ctx.send("Test alert sent.")
             else:
                 await ctx.send("No matching listings found for test.")
         except Exception as e:
-            await self.log_event(f"Error during test command for user {ctx.author.id}: {e}")
+            import traceback
+            tb = traceback.format_exc()
+            await self.log_event(f"Error during test for user {ctx.author.id}: {e}\n{tb}")
             await ctx.send("An error occurred during test.")
 
     @rmalert.command()
