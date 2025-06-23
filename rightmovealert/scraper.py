@@ -61,7 +61,6 @@ class RightmoveScraper:
         await self._init()
         page = await self.context.new_page()
         try:
-            # occasional detour to simulate browsing
             if random.random() < 0.3:
                 extras = ["/news","/why-buy","/help","/offers-for-sellers","/guides","/overseas"]
                 await page.goto(f"https://www.rightmove.co.uk{random.choice(extras)}")
@@ -71,13 +70,11 @@ class RightmoveScraper:
                 await page.wait_for_load_state("networkidle")
                 await asyncio.sleep(random.uniform(1,2))
 
-            # load main page
             await page.goto("https://www.rightmove.co.uk")
             await asyncio.sleep(random.uniform(2,5))
             if "captcha" in page.url.lower():
                 raise CaptchaError("Captcha page detected")
 
-            # human-like mouse movements
             viewport = page.viewport_size
             for _ in range(random.randint(5,10)):
                 x = random.randint(0, viewport["width"])
@@ -85,14 +82,12 @@ class RightmoveScraper:
                 await page.mouse.move(x, y, steps=random.randint(5,20))
                 await asyncio.sleep(random.uniform(0.1,0.5))
 
-            # random scrolling
             scroll_height = await page.evaluate("document.body.scrollHeight")
             for _ in range(random.randint(2,5)):
                 pos = random.randint(0, scroll_height)
                 await page.evaluate(f"window.scrollTo(0, {pos})")
                 await asyncio.sleep(random.uniform(0.5,1.5))
 
-            # simulate returning user
             await page.evaluate("localStorage.setItem('visit_time', Date.now().toString())")
 
             # locate search input with multiple fallbacks
@@ -112,31 +107,28 @@ class RightmoveScraper:
                 except PlaywrightTimeoutError:
                     continue
             if not element:
-                # cannot find search field
                 return []
 
-            # click & fill search
             try:
                 await element.click(timeout=3000)
             except:
                 pass
             await element.fill(area, timeout=5000)
-            await asyncio.sleep(random.uniform(1,3))
+            await asyncio.sleep(random.uniform(0.5,1.0))
 
-            # submit search
+            # press enter to select suggestion and submit
             try:
-                await page.click('button:has-text("Find properties")', timeout=5000)
+                await element.press("Enter")
             except:
-                await page.click('button[type="submit"]', timeout=5000)
+                await page.keyboard.press("Enter")
             await page.wait_for_load_state("networkidle")
             await asyncio.sleep(random.uniform(2,4))
 
-            # scroll results
+            # scroll to load results
             scroll_height = await page.evaluate("document.body.scrollHeight")
             await page.evaluate(f"window.scrollTo(0, {random.randint(0, scroll_height)})")
             await asyncio.sleep(random.uniform(1,2))
 
-            # scrape property cards
             cards = await page.query_selector_all(".propertyCard")
             results = []
             for card in cards:
