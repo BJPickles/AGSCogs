@@ -355,6 +355,7 @@ class RightmoveCog(commands.Cog):
         )]
         df = df[~df["type"].str.lower().isin(BANNED_PROPERTY_TYPES)]
 
+        # Load cache
         cache     = await self.config.properties()
         new_props = {r["id"]: r for _, r in df.iterrows()}
         old_ids   = set(cache)
@@ -395,7 +396,7 @@ class RightmoveCog(commands.Cog):
                     "is_stc":       r["is_stc"],
                     "active":       True,
                 }
-                await self._send_or_edit(ch, pid, r, event="new")
+                await self._send_or_edit(ch, pid, r, event="new", cache=cache)
                 continue
 
             ch = guild.get_channel(old["channel_id"])
@@ -405,13 +406,13 @@ class RightmoveCog(commands.Cog):
             if stc_changed:
                 cache[pid]["is_stc"]     = True
                 cache[pid]["updated_ts"] = r["updated_ts"]
-                await self._send_or_edit(ch, pid, r, event="stc")
+                await self._send_or_edit(ch, pid, r, event="stc", cache=cache)
                 continue
 
             if price_changed:
                 cache[pid]["price"]      = r["price"]
                 cache[pid]["updated_ts"] = r["updated_ts"]
-                await self._send_or_edit(ch, pid, r, event="price_update")
+                await self._send_or_edit(ch, pid, r, event="price_update", cache=cache)
                 continue
 
         # Vanished
@@ -421,8 +422,9 @@ class RightmoveCog(commands.Cog):
                 ch = guild.get_channel(old["channel_id"])
                 if ch:
                     cache[pid]["active"] = False
-                    await self._send_or_edit(ch, pid, None, event="vanished")
+                    await self._send_or_edit(ch, pid, None, event="vanished", cache=cache)
 
+        # Persist cache modifications (new, updates, vanished)
         await self.config.properties.set(cache)
 
         # Force‐refresh
@@ -433,14 +435,22 @@ class RightmoveCog(commands.Cog):
                     continue
                 ch = guild.get_channel(data2["channel_id"])
                 if ch:
-                    await self._send_or_edit(ch, pid, r, event="refresh")
+                    await self._send_or_edit(ch, pid, r, event="refresh", cache=cache)
 
         # Reorder
         await self._reorder_channels()
 
-    async def _send_or_edit(self, ch: discord.TextChannel, pid: str, r, event: str):
-        cache = await self.config.properties()
-        data  = cache[pid]
+    async def _send_or_edit(
+        self,
+        ch: discord.TextChannel,
+        pid: str,
+        r,
+        event: str,
+        cache: dict = None,
+    ):
+        # Use provided in‐memory cache or fall back to stored config
+        local_cache = cache if cache is not None else await self.config.properties()
+        data  = local_cache[pid]
         emojis = {
             "new":           ("🆕", "New", None),
             "price_update":  ("🔄", "Price Updated", None),
@@ -451,7 +461,7 @@ class RightmoveCog(commands.Cog):
         emoji, pre, color = emojis[event]
 
         if r is not None:
-            # Choose color
+            # Choose embed color
             price = r["price"]
             if color is None:
                 if abs(price - TARGET_PRICE) <= IDEAL_DELTA:
@@ -463,7 +473,7 @@ class RightmoveCog(commands.Cog):
                 else:
                     color = discord.Color.red()
 
-            title = r["address"] if event=="refresh" else f"{emoji} {pre} — {r['address']}"
+            title = r["address"] if event == "refresh" else f"{emoji} {pre} — {r['address']}"
             desc = (
                 f"Listed: <t:{r['listed_ts']}:F> (<t:{r['listed_ts']}:R>)\n"
                 f"Updated: <t:{r['updated_ts']}:F> (<t:{r['updated_ts']}:R>)"
@@ -474,15 +484,25 @@ class RightmoveCog(commands.Cog):
 
             embed.add_field(name="💷 Price", value=f"£{int(price):,}", inline=True)
             beds = r.get("number_bedrooms")
-            beds_str = str(int(beds)) if isinstance(beds,(int,float)) and not math.isnan(beds) else "N/A"
+            beds_str = (
+                str(int(beds)) if isinstance(beds, (int, float)) and not math.isnan(beds) else "N/A"
+            )
             embed.add_field(name="🛏 Bedrooms", value=beds_str, inline=True)
             embed.add_field(name="🏠 Type", value=r["type"], inline=True)
             if r["agent"] and r["agent_url"]:
-                embed.add_field(name="🔗 Agent", value=f"[{r['agent']}]({r['agent_url']})", inline=True)
+                embed.add_field(
+                    name="🔗 Agent",
+                    value=f"[{r['agent']}]({r['agent_url']})",
+                    inline=True,
+                )
             if r["url"]:
-                embed.add_field(name="🔗 Listing", value=f"[View on Rightmove]({r['url']})", inline=False)
+                embed.add_field(
+                    name="🔗 Listing",
+                    value=f"[View on Rightmove]({r['url']})",
+                    inline=False,
+                )
         else:
-            # vanished
+            # vanished embed
             emoji2, pre2, color2 = emojis["vanished"]
             embed = discord.Embed(
                 title=f"{emoji2} {pre2}",
@@ -498,11 +518,12 @@ class RightmoveCog(commands.Cog):
             else:
                 msg = await ch.send(embed=embed)
                 data["message_id"] = msg.id
-                await self.config.properties.set(cache)
+                # persist the new message_id
+                await self.config.properties.set(local_cache)
         except (discord.NotFound, discord.HTTPException):
             msg = await ch.send(embed=embed)
             data["message_id"] = msg.id
-            await self.config.properties.set(cache)
+            await self.config.properties.set(local_cache)
 
     async def _reorder_channels(self):
         guild = self.target_channel.guild
