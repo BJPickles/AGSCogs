@@ -1,5 +1,6 @@
 import asyncio
 import random
+import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright, Playwright, BrowserContext
 
@@ -18,7 +19,6 @@ class RightmoveScraper:
         if not self.context:
             data_dir = Path(__file__).parent / "userdata"
             data_dir.mkdir(exist_ok=True)
-            # rotate user_data_dir daily
             today = datetime.datetime.now().strftime("%Y%m%d")
             dir_path = data_dir / today
             dir_path.mkdir(exist_ok=True)
@@ -55,7 +55,6 @@ class RightmoveScraper:
         await self._init()
         page = await self.context.new_page()
         try:
-            # random full-page extra navigation
             if random.random() < 0.3:
                 extras = ["/news","/why-buy","/help","/offers-for-sellers","/guides","/overseas"]
                 await page.goto(f"https://www.rightmove.co.uk{random.choice(extras)}")
@@ -68,22 +67,18 @@ class RightmoveScraper:
             await asyncio.sleep(random.uniform(2,5))
             if "captcha" in page.url.lower():
                 raise CaptchaError("Captcha page detected")
-            # random mouse movements
             viewport = await page.viewport_size()
             for _ in range(random.randint(5,10)):
                 x = random.randint(0, viewport["width"])
                 y = random.randint(0, viewport["height"])
                 await page.mouse.move(x, y, steps=random.randint(5,20))
                 await asyncio.sleep(random.uniform(0.1,0.5))
-            # random scrolling
             scroll_height = await page.evaluate("document.body.scrollHeight")
             for _ in range(random.randint(2,5)):
                 pos = random.randint(0, scroll_height)
                 await page.evaluate(f"window.scrollTo(0, {pos})")
                 await asyncio.sleep(random.uniform(0.5,1.5))
-            # set random localStorage to simulate returning user
             await page.evaluate("localStorage.setItem('visit_time', Date.now().toString())")
-            # search
             try:
                 await page.click('input[id="searchLocation"]')
                 await page.fill('input[id="searchLocation"]', area)
@@ -91,12 +86,11 @@ class RightmoveScraper:
                 await page.fill('input[name="searchLocation"]', area)
             await asyncio.sleep(random.uniform(1,3))
             try:
-                await page.click('button:has-text(\"Find properties\")')
+                await page.click('button:has-text("Find properties")')
             except:
-                await page.click('button[type=\"submit\"]')
+                await page.click('button[type="submit"]')
             await page.wait_for_load_state("networkidle")
             await asyncio.sleep(random.uniform(2,4))
-            # more scrolling
             scroll_height = await page.evaluate("document.body.scrollHeight")
             await page.evaluate(f"window.scrollTo(0, {random.randint(0, scroll_height)})")
             await asyncio.sleep(random.uniform(1,2))

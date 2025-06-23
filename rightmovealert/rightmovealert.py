@@ -89,14 +89,14 @@ class RightmoveAlert(commands.Cog):
                         delay = min((2 ** self.scraper.backoff_count) * 10, 600)
                         await asyncio.sleep(delay)
                         return
-                    async with self.config.global() as g:
+                    async with getattr(self.config, "global")() as g:
                         g['listings_checked'] += len(listings)
                     for uid, data in user_list:
                         if not now_in_windows(data.get("active_hours")):
                             continue
                         try:
                             matches, blocked = filter_listings(listings, data)
-                            async with self.config.global() as g:
+                            async with getattr(self.config, "global")() as g:
                                 g['matched'] += len(matches)
                                 g['blocked'] += blocked
                             seen = set(data.get("seen", []))
@@ -108,7 +108,7 @@ class RightmoveAlert(commands.Cog):
                                 seen.add(listing["id"])
                             async with self.config.user(uid) as u:
                                 u['seen'] = list(seen)
-                            async with self.config.global() as g:
+                            async with getattr(self.config, "global")() as g:
                                 ua = g.get('user_alerts', {})
                                 ua[str(uid)] = ua.get(str(uid), 0) + len(new)
                                 g['user_alerts'] = ua
@@ -123,7 +123,7 @@ class RightmoveAlert(commands.Cog):
     @tasks.loop(time=datetime.time(hour=23, minute=59), timezone=pytz.timezone('Europe/London'))
     async def daily_summary(self):
         try:
-            g = await self.config.global()
+            g = await getattr(self.config, "global")()
             listings_checked = g.get('listings_checked', 0)
             matched = g.get('matched', 0)
             blocked = g.get('blocked', 0)
@@ -144,7 +144,7 @@ class RightmoveAlert(commands.Cog):
                             await ch.send(embed=embed)
                         except:
                             pass
-            async with self.config.global() as g2:
+            async with getattr(self.config, "global")() as g2:
                 g2['listings_checked'] = 0
                 g2['matched'] = 0
                 g2['blocked'] = 0
