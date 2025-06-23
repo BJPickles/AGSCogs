@@ -69,7 +69,7 @@ class RightmoveScraper:
         await self._init()
         page = await self.context.new_page()
         try:
-            # small detour to look more human
+            # occasional detour to simulate browsing
             if random.random() < 0.3:
                 for extra in ["/news","/why-buy","/help","/offers-for-sellers","/guides","/overseas"]:
                     await page.goto(f"https://www.rightmove.co.uk{extra}")
@@ -79,7 +79,7 @@ class RightmoveScraper:
                 await page.wait_for_load_state("networkidle")
                 await asyncio.sleep(random.uniform(1,2))
 
-            # fetch locationIdentifier via autocomplete API
+            # get locationIdentifier via autocomplete API
             identifier = None
             try:
                 resp = await page.request.get(
@@ -93,11 +93,11 @@ class RightmoveScraper:
             except:
                 identifier = None
 
-            # fallback to your default polygon
+            # fallback to default polygon
             if not identifier:
                 identifier = self._default_encoded
 
-            # build the exact URL from your example
+            # build URL with your example parameters
             price_q = max_price if max_price is not None else ""
             search_url = (
                 "https://www.rightmove.co.uk/property-for-sale/find.html?"
@@ -110,41 +110,36 @@ class RightmoveScraper:
                 f"&dontShow=newHome,retirement,sharedOwnership,auction"
             )
 
-            # go to the filtered results
+            # navigate and wait
             await page.goto(search_url)
             await page.wait_for_load_state("networkidle")
             await asyncio.sleep(random.uniform(2,4))
 
-            # human-like scroll
+            # human-like scrolls
             for _ in range(random.randint(2,5)):
                 scroll_height = await page.evaluate("document.body.scrollHeight")
                 await page.evaluate(f"window.scrollTo(0, {random.randint(0, scroll_height)})")
                 await asyncio.sleep(random.uniform(0.5,1.5))
 
-            # grab any of the common card selectors
-            cards = await (
-                page.query_selector_all(".propertyCard")
-                + page.query_selector_all("li.component_property-card")
-                + page.query_selector_all("[data-testid='property-card']")
-            )
+            # gather cards via multiple selectors
+            cards = []
+            cards += await page.query_selector_all(".propertyCard")
+            cards += await page.query_selector_all("li.component_property-card")
+            cards += await page.query_selector_all("[data-testid='property-card']")
+
             results = []
             for card in cards:
                 try:
-                    # ID
-                    cid = await card.get_attribute("data-listing-id") or await card.get_attribute("id") or ""
+                    cid = (await card.get_attribute("data-listing-id")) or (await card.get_attribute("id")) or ""
                     listing_id = cid.split("-")[-1]
-                    # Title
-                    title_el = await card.query_selector(".propertyCard-title") or await card.query_selector("[data-testid='listing-title']")
+                    title_el = (await card.query_selector(".propertyCard-title")) or (await card.query_selector("[data-testid='listing-title']"))
                     title = await title_el.inner_text() if title_el else ""
-                    # URL
-                    anchor = await card.query_selector("a.propertyCard-link") or await card.query_selector("a")
+                    anchor = (await card.query_selector("a.propertyCard-link")) or (await card.query_selector("a"))
                     href = await anchor.get_attribute("href") if anchor else ""
                     url = f"https://www.rightmove.co.uk{href}" if href else ""
-                    # Price
-                    price_el = await card.query_selector(".propertyCard-priceValue") or await card.query_selector("[data-testid='listing-price']")
+                    price_el = (await card.query_selector(".propertyCard-priceValue")) or (await card.query_selector("[data-testid='listing-price']"))
                     price_text = await price_el.text_content() if price_el else ""
                     price = int("".join(filter(str.isdigit, price_text))) if price_text else 0
-                    # Beds
                     beds = 0
                     for li in await card.query_selector_all(".propertyCard-details li"):
                         txt = await li.text_content() or ""
@@ -154,13 +149,10 @@ class RightmoveScraper:
                             except:
                                 beds = 0
                             break
-                    # Location
-                    loc_el = await card.query_selector(".propertyCard-address") or await card.query_selector("[data-testid='listing-address']")
+                    loc_el = (await card.query_selector(".propertyCard-address")) or (await card.query_selector("[data-testid='listing-address']"))
                     location = await loc_el.text_content() if loc_el else ""
-                    # Description (if any)
                     desc_el = await card.query_selector(".propertyCard-description")
                     description = await desc_el.text_content() if desc_el else ""
-                    # Screenshot
                     screenshot = await card.screenshot(type="png")
                     results.append({
                         "id": listing_id,
@@ -180,7 +172,6 @@ class RightmoveScraper:
             await page.close()
 
     async def close(self):
-        """Close browser context and playwright."""
         if self.context:
             await self.context.close()
         if self.playwright:
