@@ -63,7 +63,8 @@ class RightmoveData:
     def results_count_display(self):
         """Total listings as shown on the first page, or 0 if not found."""
         tree = html.fromstring(self._first_page)
-        xp = "//span[@class='searchHeader-resultCount']/text()"
+        # now using contains()
+        xp = "//span[contains(@class,'searchHeader-resultCount')]/text()"
         items = tree.xpath(xp)
         if not items:
             return 0
@@ -74,92 +75,95 @@ class RightmoveData:
 
     @property
     def page_count(self):
-        """Number of pages (24 results per page, max 42)."""
+        """Number of pages (24 results/page, max 42)."""
         total = self.results_count_display
-        # if no total or fewer than 25, just 1 page
         if total < 1 or total <= 24:
             return 1
         pages = total // 24 + (1 if total % 24 else 0)
         return min(pages, 42)
 
     def _get_page(self, content: bytes, get_floorplans: bool = False):
+        """Scrape a single page by iterating each card."""
         tree = html.fromstring(content)
-        # price XPaths differ for rent vs sale
-        if "rent" in self.rent_or_sale:
-            xp_price = "//span[@class='propertyCard-priceValue']/text()"
-        else:
-            xp_price = "//div[@class='propertyCard-priceValue']/text()"
+        # find all property cards
+        cards = tree.xpath("//div[contains(@class,'propertyCard')]")
+        rows = []
+        base = "https://www.rightmove.co.uk"
+        for c in cards:
+            # price
+            price = c.xpath(".//*[contains(@class,'propertyCard-priceValue')]/text()")
+            price = price[0].strip() if price else None
+            # title / type
+            title = c.xpath(".//h2[contains(@class,'propertyCard-title')]/text()")
+            title = title[0].strip() if title else None
+            # address (join all span parts)
+            addr_parts = c.xpath(".//address[contains(@class,'propertyCard-address')]//span/text()")
+            address = " ".join([p.strip() for p in addr_parts]) if addr_parts else None
+            # link
+            href = c.xpath(".//a[contains(@class,'propertyCard-link')]/@href")
+            url = base + href[0] if href else None
+            # agent link
+            ag = c.xpath(".//a[contains(@class,'propertyCard-branchLogo-link')]/@href")
+            agent_url = base + ag[0] if ag else None
 
-        xp_title   = "//div[@class='propertyCard-details']//h2[@class='propertyCard-title']/text()"
-        xp_address = "//address[@class='propertyCard-address']//span/text()"
-        xp_link    = "//div[@class='propertyCard-details']//a[@class='propertyCard-link']/@href"
-        xp_agent   = (
-            "//div[@class='propertyCard-contactsItem']"
-            "//a[@class='propertyCard-branchLogo-link']/@href"
-        )
+            # optionally floorplan (skip by default)
+            floorplan = np.nan
+            if get_floorplans and url:
+                sc, ct = self._request(url)
+                if sc == 200:
+                    t2 = html.fromstring(ct)
+                    fp = t2.xpath("//*[@id='floorplanTabs']/div[2]/div[2]/img/@src")
+                    floorplan = fp[0] if fp else np.nan
 
-        prices    = tree.xpath(xp_price)
-        titles    = tree.xpath(xp_title)
-        addresses = tree.xpath(xp_address)
-        base      = "https://www.rightmove.co.uk"
-        links     = [f"{base}{u}" for u in tree.xpath(xp_link)]
-        agents    = [f"{base}{u}" for u in tree.xpath(xp_agent)]
+            row = {
+                "price": price,
+                "type": title,
+                "address": address,
+                "url": url,
+                "agent_url": agent_url,
+            }
+            if get_floorplans:
+                row["floorplan_url"] = floorplan
 
-        floorplans = [] if get_floorplans else np.nan
-        if get_floorplans:
-            for u in links:
-                sc, ct = self._request(u)
-                if sc != 200:
-                    floorplans.append(np.nan)
-                    continue
-                t2 = html.fromstring(ct)
-                fp = t2.xpath("//*[@id='floorplanTabs']/div[2]/div[2]/img/@src")
-                floorplans.append(fp[0] if fp else np.nan)
+            rows.append(row)
 
-        data = [prices, titles, addresses, links, agents]
-        if get_floorplans:
-            data.append(floorplans)
-
-        cols = ["price", "type", "address", "url", "agent_url"]
-        if get_floorplans:
-            cols.append("floorplan_url")
-
-        df = pd.DataFrame(list(zip(*data)), columns=cols)
-        return df[df["address"].notnull()]
+        return pd.DataFrame(rows)
 
     def _get_results(self, get_floorplans: bool = False):
-        results = self._get_page(self._first_page, get_floorplans)
-        # only iterate pages 2..page_count
+        df = self._get_page(self._first_page, get_floorplans)
+        # iterate pages 2..page_count
         for p in range(1, self.page_count):
-            p_url = f"{self.url}&index={p*24}"
-            sc, content = self._request(p_url)
+            page_url = f"{self.url}&index={p*24}"
+            sc, content = self._request(page_url)
             if sc != 200:
                 break
-            temp = self._get_page(content, get_floorplans)
-            results = pd.concat([results, temp], ignore_index=True)
-        return self._clean_results(results)
+            tmp = self._get_page(content, get_floorplans)
+            df = pd.concat([df, tmp], ignore_index=True)
+        return self._clean_results(df)
 
     @staticmethod
-    def _clean_results(results: pd.DataFrame):
-        results["price"] = (
-            results["price"].replace(r"\D+", "", regex=True).astype(float)
-        )
-        results["postcode"] = results["address"].str.extract(
-            r"\b([A-Za-z][A-Za-z]?[0-9][0-9]?[A-Za-z]?)\b"
-        )[0]
-        results["full_postcode"] = results["address"].str.extract(
+    def _clean_results(df: pd.DataFrame):
+        # price → numeric
+        df["price"] = df["price"].replace(r"\D+", "", regex=True).astype(float)
+        # short postcode
+        df["postcode"] = df["address"].str.extract(r"\b([A-Za-z][A-Za-z]?[0-9][0-9]?[A-Za-z]?)\b")[0]
+        # full postcode
+        df["full_postcode"] = df["address"].str.extract(
             r"([A-Za-z][A-Za-z]?[0-9][0-9]?[A-Za-z]?[0-9]?\s[0-9]?[A-Za-z][A-Za-z])"
         )[0]
-        beds = results["type"].str.extract(r"\b(\d{1,2})\b")[0].fillna("")
+        # bedrooms
+        beds = df["type"].str.extract(r"\b(\d{1,2})\b")[0].fillna("")
         beds[beds.str.lower().str.contains("studio")] = "0"
-        results["number_bedrooms"] = pd.to_numeric(beds, errors="coerce").fillna(0).astype(int)
-        results["type"] = results["type"].str.strip()
-        results["search_date"] = datetime.datetime.now()
-        return results
+        df["number_bedrooms"] = pd.to_numeric(beds, errors="coerce").fillna(0).astype(int)
+        # clean up
+        df["type"] = df["type"].str.strip()
+        df["search_date"] = datetime.datetime.now()
+        return df
 
 
 class RightmoveCog(commands.Cog):
     """Scrapes Rightmove daily and posts new listings in an embed."""
+
     def __init__(self, bot):
         self.bot = bot
         self.target_channel: discord.TextChannel = None
@@ -189,6 +193,7 @@ class RightmoveCog(commands.Cog):
         await ctx.send("✅ Scraping stopped.")
 
     async def do_scrape(self):
+        # your 14‐day URL
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
             "sortType=1&viewType=LIST&channel=BUY"
