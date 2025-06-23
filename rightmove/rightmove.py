@@ -1,6 +1,7 @@
 import re
 import time
 import datetime
+import asyncio
 from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 
@@ -11,6 +12,7 @@ import requests
 
 import discord
 from discord.ext import tasks
+from discord.ext.commands import TextChannelConverter, BadArgument
 from redbot.core import Config, commands
 
 # ----------------------------
@@ -169,21 +171,21 @@ class RightmoveData:
             href = c.xpath(".//a[@data-test='property-details']/@href")
             url = f"{base}{href[0]}" if href else None
 
-            # first image (pick the highest-res from srcset)
-            imgs = c.xpath(".//img[@data-testid='property-img-1']")
-            if imgs:
-                img_el = imgs[0]
-                srcset = img_el.get("srcset")
+            # first image: pick largest from srcset if available
+            img_elems = c.xpath(".//img[@data-testid='property-img-1']") or []
+            if img_elems:
+                img_tag = img_elems[0]
+                srcset = img_tag.get("srcset", "")
                 if srcset:
-                    try:
-                        candidates = [piece.strip().split(" ")[0] for piece in srcset.split(",")]
-                        img_url = candidates[-1]
-                    except Exception:
-                        img_url = img_el.get("src")
+                    candidates = [seg.strip().split(" ")[0] for seg in srcset.split(",")]
+                    img_url = candidates[-1]
                 else:
-                    img_url = img_el.get("src")
+                    img_url = img_tag.get("src") or None
             else:
                 img_url = None
+            # ensure full URL
+            if img_url and img_url.startswith("//"):
+                img_url = "https:" + img_url
 
             # agent
             an = c.xpath(
@@ -234,7 +236,7 @@ class RightmoveData:
         df = self._get_page(self._first_page, get_floorplans)
         for p in range(1, self.page_count):
             u = f"{self._url}&index={p*24}"
-            sc,ct = self._request(u)
+            sc, ct = self._request(u)
             if sc != 200:
                 break
             tmp = self._get_page(ct, get_floorplans)
@@ -253,6 +255,9 @@ class RightmoveCog(commands.Cog):
         self.config.register_global(properties={})
         self.scrape_loop = None
         self.target_channel = None
+        # for rebuild / cooldown
+        self._rebuild_lock = asyncio.Lock()
+        self._last_test = 0.0
 
     def cog_unload(self):
         if self.scrape_loop and self.scrape_loop.is_running():
@@ -292,15 +297,46 @@ class RightmoveCog(commands.Cog):
         await ctx.send("✅ Scrape unscheduled.")
 
     @rm.command(name="test")
-    async def rm_test(self, ctx, channel: discord.TextChannel = None):
+    async def rm_test(self, ctx, *args):
         """
         Run one manual scrape immediately.
-        Optionally pass a channel to override where embeds go.
+        Optionally pass a channel and/or 'override':
+          .rm test #channel override
         """
-        # Ensure we have a target channel
+        # parse override + optional channel
+        override = False
+        channel = None
+        for arg in args:
+            if arg.lower() == "override":
+                override = True
+            else:
+                try:
+                    channel = await TextChannelConverter().convert(ctx, arg)
+                except BadArgument:
+                    continue
+
         self.target_channel = channel or self.target_channel or ctx.channel
+
+        # block if a rebuild is in progress
+        if self._rebuild_lock.locked() and not override:
+            return await ctx.send(
+                "❌ A rebuild is already in progress. "
+                "Please wait or use `.rm test override` to force."
+            )
+
+        # 5 minute cooldown
+        now = time.time()
+        if (now - self._last_test) < 300 and not override:
+            rem = int(300 - (now - self._last_test))
+            return await ctx.send(
+                f"❌ You must wait {rem}s before running `.rm test` again, "
+                "or use `.rm test override`."
+            )
+        self._last_test = now
+
         await ctx.send("🔄 Running manual scrape…")
-        await self.do_scrape()
+        async with self._rebuild_lock:
+            await self.do_scrape()
         await ctx.send("✅ Manual scrape done.")
 
     async def do_scrape(self):
@@ -308,7 +344,7 @@ class RightmoveCog(commands.Cog):
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
             "sortType=1&viewType=LIST&channel=BUY"
-            "&maxPrice=175000&radius=0.0"
+            "&maxPrice=250000&radius=0.0"
             "&locationIdentifier=USERDEFINEDAREA%5E%7B"
             "%22polylines%22%3A%22sh%7CtHhu%7BE%7D%7CDr_Nf%7B"
             "AnjZxvLz%7Df%40reAllgA%7Bab%40fg%60%40kyu%40s_"
@@ -329,7 +365,7 @@ class RightmoveCog(commands.Cog):
         old_ids   = set(cache)
         new_ids   = set(new_props)
 
-        guild = self.target_channel.guild
+        guild    = self.target_channel.guild
 
         # find/create category under CATEGORY_PREFIX with <MAX_PER_CATEGORY> prop- channels
         existing = [
@@ -396,6 +432,36 @@ class RightmoveCog(commands.Cog):
                     await self.post_embed(ch, None, event="vanished")
 
         await self.config.properties.set(cache)
+        # finally, reorder every category
+        await self._reorder_channels()
+
+    async def _reorder_channels(self):
+        guild = self.target_channel.guild
+        cache = await self.config.properties()
+        for cat in guild.categories:
+            if not cat.name.startswith(CATEGORY_PREFIX):
+                continue
+            # gather (price, channel_id)
+            ordering = []
+            for ch in cat.channels:
+                if not isinstance(ch, discord.TextChannel):
+                    continue
+                if not ch.name.startswith("prop-"):
+                    continue
+                pid = ch.name.split("-", 1)[1]
+                prop = cache.get(pid, {})
+                price = prop["price"] if prop.get("active", False) else float("inf")
+                ordering.append((price, ch.id))
+            ordering.sort(key=lambda x: x[0])
+            positions = [
+                {"id": cid, "position": idx, "parent_id": cat.id}
+                for idx, (_, cid) in enumerate(ordering)
+            ]
+            if positions:
+                try:
+                    await guild.edit_channel_positions(positions=positions)
+                except Exception:
+                    pass
 
     async def post_embed(self, ch: discord.TextChannel, r, event: str):
         emojis = {
@@ -406,7 +472,6 @@ class RightmoveCog(commands.Cog):
         }
         emoji, pre, color = emojis[event]
 
-        # r is a pandas Series for new/update/STC, or None for vanished
         if r is not None:
             price = r["price"]
             if color is None:
@@ -425,27 +490,16 @@ class RightmoveCog(commands.Cog):
                 f"Updated: <t:{r['updated_ts']}:F> (<t:{r['updated_ts']}:R>)"
             )
             embed = discord.Embed(title=title, color=color, description=desc)
-
-            if r["image_url"]:
-                embed.set_image(url=r["image_url"])
-
+            embed.set_thumbnail(url=r["image_url"])
             embed.add_field(name="💷 Price", value=f"£{int(price):,}", inline=True)
             embed.add_field(name="🛏 Bedrooms", value=str(r["number_bedrooms"]), inline=True)
             embed.add_field(name="🏠 Type", value=r["type"], inline=True)
             if r["agent"] and r["agent_url"]:
                 embed.add_field(
-                    name="🔗 Agent",
-                    value=f"[{r['agent']}]({r['agent_url']})",
-                    inline=True,
+                    name="🔗 Agent", value=f"[{r['agent']}]({r['agent_url']})", inline=True
                 )
             await ch.send(embed=embed)
-
-            # reorder channels in this category by ascending price
-            if event in ("new", "price_update") and ch.category:
-                await self.reorder_category(ch.category)
-
         else:
-            # vanished
             emoji, pre, color = emojis["vanished"]
             embed = discord.Embed(
                 title=f"{emoji} {pre}",
@@ -453,41 +507,3 @@ class RightmoveCog(commands.Cog):
                 description="This property has vanished from the search.",
             )
             await ch.send(embed=embed)
-
-    async def reorder_category(self, category: discord.CategoryChannel):
-        """Sort all active prop-* channels in this category by ascending price."""
-        guild = category.guild
-        cache = await self.config.properties()
-
-        # collect (price, channel) pairs
-        items = []
-        for pid, data in cache.items():
-            if not data.get("active", False):
-                continue
-            ch_id = data.get("channel_id")
-            price = data.get("price")
-            if ch_id is None or price is None:
-                continue
-            ch = guild.get_channel(ch_id)
-            if ch and ch.category_id == category.id:
-                items.append((price, ch))
-
-        # sort by price
-        items.sort(key=lambda x: x[0])
-
-        if not items:
-            return
-
-        positions = [{"id": ch.id, "parent_id": category.id, "position": idx}
-                     for idx, (_, ch) in enumerate(items)]
-
-        # apply batch edit if available
-        try:
-            await guild.edit_channel_positions(positions=positions)
-        except (AttributeError, TypeError):
-            # fallback individual edits
-            for idx, (_, ch) in enumerate(items):
-                try:
-                    await ch.edit(position=idx)
-                except:
-                    pass
