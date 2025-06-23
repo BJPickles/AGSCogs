@@ -56,13 +56,7 @@ class RightmoveData:
     def _request(url: str):
         r = requests.get(
             url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/115.0.0 Safari/537.36"
-                )
-            },
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
             timeout=10,
         )
         return r.status_code, r.content
@@ -117,52 +111,36 @@ class RightmoveData:
         rows = []
         base = "https://www.rightmove.co.uk"
         for c in cards:
-            # raw price text
             pr = c.xpath(
                 ".//a[@data-testid='property-price']//div"
                 "[contains(@class,'PropertyPrice_price__')]/text()"
             )
             price_raw = pr[0].strip() if pr else None
 
-            # address
             ad = c.xpath(".//*[@data-testid='property-address']//address/text()")
             address = ad[0].strip() if ad else None
 
-            # property type
-            tp = c.xpath(
-                ".//span[contains(@class,'PropertyInformation_propertyType')]/text()"
-            )
+            tp = c.xpath(".//span[contains(@class,'PropertyInformation_propertyType')]/text()")
             ptype = tp[0].strip() if tp else None
 
-            # bedrooms
-            bd = c.xpath(
-                ".//span[contains(@class,'PropertyInformation_bedroomsCount')]/text()"
-            )
+            bd = c.xpath(".//span[contains(@class,'PropertyInformation_bedroomsCount')]/text()")
             try:
                 beds = int(bd[0]) if bd else None
             except ValueError:
                 beds = None
 
-            # listed/updated
-            ld = c.xpath(
-                ".//span[contains(@class,'MarketedBy_joinedText')]/text()"
-            ) or [None]
-            ud = c.xpath(
-                ".//span[contains(@class,'MarketedBy_addedOrReduced')]/text()"
-            ) or [None]
+            ld = c.xpath(".//span[contains(@class,'MarketedBy_joinedText')]/text()") or [None]
+            ud = c.xpath(".//span[contains(@class,'MarketedBy_addedOrReduced')]/text()") or [None]
             listed_ts  = self._parse_date(ld[0])
             updated_ts = self._parse_date(ud[0])
 
-            # STC?
             stc = bool(c.xpath(
                 ".//span[contains(text(),'STC') or contains(text(),'Subject to contract')]"
             ))
 
-            # detail URL
             href = c.xpath(".//a[@data-test='property-details']/@href")
             url = f"{base}{href[0]}" if href else None
 
-            # largest image from srcset
             img_elems = c.xpath(".//img[@data-testid='property-img-1']") or []
             img_url = None
             if img_elems:
@@ -176,7 +154,6 @@ class RightmoveData:
             if img_url and img_url.startswith("//"):
                 img_url = "https:" + img_url
 
-            # agent
             an = c.xpath(
                 ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]//img/@alt"
             )
@@ -186,7 +163,6 @@ class RightmoveData:
             )
             agent_url = f"{base}{au[0]}" if au else None
 
-            # property ID
             pid = None
             if url:
                 m = re.search(r"/properties/(\d+)", url)
@@ -270,7 +246,10 @@ class RightmoveCog(commands.Cog):
 
     @rm.command(name="test")
     async def rm_test(self, ctx, *args):
-        """Run a manual scrape; optional: .rm test [#channel] [override]"""
+        """
+        Run a manual scrape immediately.
+        Optional: .rm test [#channel] [override]
+        """
         override = False
         channel = None
         for arg in args:
@@ -288,6 +267,7 @@ class RightmoveCog(commands.Cog):
             return await ctx.send(
                 "❌ A rebuild is already in progress. Use `.rm test override` to force."
             )
+
         now = time.time()
         if now - self._last_test < 300 and not override:
             return await ctx.send(
@@ -298,10 +278,10 @@ class RightmoveCog(commands.Cog):
 
         await ctx.send("🔄 Running manual scrape…")
         async with self._rebuild_lock:
-            await self.do_scrape()
+            await self.do_scrape(force_update=override)
         await ctx.send("✅ Manual scrape done.")
 
-    async def do_scrape(self):
+    async def do_scrape(self, force_update: bool = False):
         # Full, un-truncated Rightmove URL
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
@@ -326,13 +306,15 @@ class RightmoveCog(commands.Cog):
         old_ids, new_ids = set(cache), set(new_props)
         guild = self.target_channel.guild
 
-        # find or create category under CATEGORY_PREFIX
+        # find/create category under CATEGORY_PREFIX
         cats = [c for c in guild.categories if c.name.startswith(CATEGORY_PREFIX)]
         cats.sort(key=lambda c: int(c.name.split()[-1]) if c.name.split()[-1].isdigit() else 1)
         target_cat = None
         for cat in cats:
-            cnt = sum(1 for ch in cat.channels
-                      if isinstance(ch, discord.TextChannel) and ch.name.startswith("prop-"))
+            cnt = sum(
+                1 for ch in cat.channels
+                if isinstance(ch, discord.TextChannel) and ch.name.startswith("prop-")
+            )
             if cnt < MAX_PER_CATEGORY:
                 target_cat = cat
                 break
@@ -340,12 +322,16 @@ class RightmoveCog(commands.Cog):
             idx = int(cats[-1].name.split()[-1]) + 1 if cats else 1
             target_cat = await guild.create_category(f"{CATEGORY_PREFIX} {idx}")
 
-        # handle new listings & updates
+        # new listings, price changes, STC
         for pid, r in new_props.items():
-            is_new        = pid not in cache
-            old           = cache.get(pid, {})
+            is_new = pid not in cache
+            old = cache.get(pid, {})
             price_changed = (not is_new) and (r["price"] != old.get("price"))
-            stc_changed   = r["is_stc"] and not old.get("is_stc", False)
+            stc_changed = r["is_stc"] and not old.get("is_stc", False)
+
+            # force_update => treat as price_changed
+            if force_update and not is_new:
+                price_changed = True
 
             if is_new:
                 name = f"prop-{int(r['price'])}-{pid}"
@@ -366,7 +352,7 @@ class RightmoveCog(commands.Cog):
                 continue
 
             if stc_changed:
-                cache[pid]["is_stc"]     = True
+                cache[pid]["is_stc"] = True
                 cache[pid]["updated_ts"] = r["updated_ts"]
                 await self.post_embed(ch, r, "stc")
                 continue
@@ -374,15 +360,15 @@ class RightmoveCog(commands.Cog):
             if price_changed:
                 new_name = f"prop-{int(r['price'])}-{pid}"
                 await ch.edit(name=new_name)
-                cache[pid]["price"]      = r["price"]
+                cache[pid]["price"] = r["price"]
                 cache[pid]["updated_ts"] = r["updated_ts"]
                 await self.post_embed(ch, r, "price_update")
                 continue
 
-        # handle vanished listings
+        # vanished
         for pid in old_ids - new_ids:
             old = cache[pid]
-            if old.get("active", True):
+            if old.get("active", False):
                 ch = guild.get_channel(old["channel_id"])
                 if ch:
                     cache[pid]["active"] = False
@@ -399,11 +385,8 @@ class RightmoveCog(commands.Cog):
                 continue
             ordering = []
             for ch in cat.channels:
-                if not isinstance(ch, discord.TextChannel):
+                if not isinstance(ch, discord.TextChannel) or not ch.name.startswith("prop-"):
                     continue
-                if not ch.name.startswith("prop-"):
-                    continue
-                # channel name is prop-<price>-<id>
                 pid = ch.name.rsplit("-", 1)[-1]
                 prop = cache.get(pid, {})
                 price = prop["price"] if prop.get("active", False) else float("inf")
@@ -447,7 +430,7 @@ class RightmoveCog(commands.Cog):
             )
             embed = discord.Embed(title=title, color=color, description=desc)
 
-            # use the large image
+            # big image
             if r.get("image_url"):
                 embed.set_image(url=r["image_url"])
 
