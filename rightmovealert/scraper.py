@@ -13,7 +13,7 @@ class RightmoveScraper:
         self.playwright: Playwright = None
         self.context: BrowserContext = None
         self.backoff_count = 0
-        # raw default region code for Hampshire
+        # default raw region code for Hampshire
         self._default_region = "REGION^61303"
 
     async def _init(self):
@@ -45,7 +45,6 @@ class RightmoveScraper:
                 locale="en-GB",
                 timezone_id="Europe/London"
             )
-            # stealth
             await self.context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {get: () => false});
                 window.navigator.chrome = { runtime: {} };
@@ -54,32 +53,33 @@ class RightmoveScraper:
                 Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
                 Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 4 });
                 Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-                const originalPerm = navigator.permissions.query;
-                navigator.permissions.query = params => params.name === 'notifications'
-                  ? Promise.resolve({ state: Notification.permission })
-                  : originalPerm(params);
+                const originalQuery = navigator.permissions.query;
+                navigator.permissions.query = parameters =>
+                  parameters.name === 'notifications'
+                    ? Promise.resolve({ state: Notification.permission })
+                    : originalQuery(parameters);
             """)
 
-    async def scrape_area(self, area: str, max_price: int = None, min_beds: int = None, region_code: str = None) -> list:
+    async def scrape_area(
+        self,
+        area: str,
+        max_price: int = None,
+        min_beds: int = None,
+        region_code: str = None
+    ) -> list:
         """
-        Scrape Rightmove by constructing the URL:
-          https://www.rightmove.co.uk/property-for-sale/find.html?
-            searchLocation=Hampshire
-            &useLocationIdentifier=true
-            &locationIdentifier=REGION%5E61303
-            &radius=0.5
-            [&maxPrice=...]
-            [&minBedrooms=...]
-            &propertyTypes=detached,semi-detached,terraced
-            &_includeSSTC=on&includeSSTC=true
-            &sortType=2&viewType=LIST&channel=BUY&index=0
+        Scrape Rightmove using a direct URL with your ideal filters,
+        including cookie‐banner dismissal.
         """
         await self._init()
         page = await self.context.new_page()
         try:
-            # occasional human-like detour
+            # occasional browsing detour
             if random.random() < 0.3:
-                for extra in ("/news","/why-buy","/help","/offers-for-sellers","/guides","/overseas"):
+                for extra in (
+                    "/news", "/why-buy", "/help",
+                    "/offers-for-sellers", "/guides", "/overseas"
+                ):
                     await page.goto(f"https://www.rightmove.co.uk{extra}")
                     await page.wait_for_load_state("networkidle")
                     await asyncio.sleep(random.uniform(1, 2))
@@ -87,34 +87,47 @@ class RightmoveScraper:
                 await page.wait_for_load_state("networkidle")
                 await asyncio.sleep(random.uniform(1, 2))
 
-            # select region identifier
+            # choose region identifier
             identifier = region_code or self._default_region
 
-            # build query params, omitting empty ones
+            # build query parameters
             params = {
                 "searchLocation": area,
                 "useLocationIdentifier": "true",
                 "locationIdentifier": identifier,
                 "radius": 0.5,
-                "propertyTypes": "detached,semi-detached,terraced",
                 "_includeSSTC": "on",
                 "includeSSTC": "true",
                 "sortType": 2,
                 "viewType": "LIST",
                 "channel": "BUY",
                 "index": 0,
+                "propertyTypes": "detached,semi-detached,terraced"
             }
             if max_price is not None:
                 params["maxPrice"] = max_price
             if min_beds is not None:
                 params["minBedrooms"] = min_beds
 
-            search_url = "https://www.rightmove.co.uk/property-for-sale/find.html?" + urlencode(params)
+            search_url = (
+                "https://www.rightmove.co.uk/property-for-sale/find.html?"
+                + urlencode(params)
+            )
 
-            # navigate
+            # debug: show the URL used
+            print("Scraping URL:", search_url)
+
+            # navigate to search URL
             await page.goto(search_url)
             await page.wait_for_load_state("networkidle")
             await asyncio.sleep(random.uniform(2, 4))
+
+            # dismiss cookie consent banner
+            try:
+                await page.click('#onetrust-reject-all-handler', timeout=5000)
+                await asyncio.sleep(1)
+            except:
+                pass
 
             # human-like scrolling
             for _ in range(random.randint(2, 5)):
@@ -122,12 +135,18 @@ class RightmoveScraper:
                 await page.evaluate(f"window.scrollTo(0, {random.randint(0, h)})")
                 await asyncio.sleep(random.uniform(0.5, 1.5))
 
-            # scrape .propertyCard elements
+            # ensure at least one card is present
+            await page.wait_for_selector(".propertyCard", timeout=5000)
+
             cards = await page.query_selector_all(".propertyCard")
             results = []
             for card in cards:
                 try:
-                    cid = (await card.get_attribute("data-listing-id")) or (await card.get_attribute("id")) or ""
+                    cid = (
+                        await card.get_attribute("data-listing-id")
+                        or await card.get_attribute("id")
+                        or ""
+                    )
                     listing_id = cid.split("-")[-1]
                     title_el = await card.query_selector(".propertyCard-title")
                     title = await title_el.inner_text() if title_el else ""
@@ -138,14 +157,21 @@ class RightmoveScraper:
                     price_text = await price_el.text_content() if price_el else ""
                     price = int("".join(filter(str.isdigit, price_text))) if price_text else 0
                     beds = 0
-                    for li in await card.query_selector_all(".propertyCard-details li"):
+                    for li in await card.query_selector_all(
+                        ".propertyCard-details li"
+                    ):
                         txt = await li.text_content() or ""
                         if "bed" in txt.lower():
-                            beds = int(txt.split()[0]) if txt.split()[0].isdigit() else 0
+                            beds = (
+                                int(txt.split()[0])
+                                if txt.split()[0].isdigit() else 0
+                            )
                             break
                     loc_el = await card.query_selector(".propertyCard-address")
                     location = await loc_el.text_content() if loc_el else ""
-                    desc_el = await card.query_selector(".propertyCard-description")
+                    desc_el = await card.query_selector(
+                        ".propertyCard-description"
+                    )
                     description = await desc_el.text_content() if desc_el else ""
                     results.append({
                         "id": listing_id,
@@ -160,11 +186,12 @@ class RightmoveScraper:
                     continue
 
             return results
+
         finally:
             await page.close()
 
     async def close(self):
-        """Close browser context and Playwright."""
+        """Close the browser context and Playwright."""
         if self.context:
             await self.context.close()
         if self.playwright:
