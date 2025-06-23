@@ -1,4 +1,5 @@
 from .rightmovealert import RightmoveAlert
 
-def setup(bot):
-    bot.add_cog(RightmoveAlert(bot))
+async def setup(bot):
+    cog = RightmoveAlert(bot)
+    await bot.add_cog(cog)
