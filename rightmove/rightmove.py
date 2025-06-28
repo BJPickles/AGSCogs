@@ -51,8 +51,6 @@ BANNED_TYPE_SUBSTRINGS = [
     "not specified", "not-specified", "notspecified",
 ]
 
-MAX_DESC_FIELD = 1024  # Discord embed field limit
-
 class RightmoveData:
     """Scrapes Rightmove search results and returns a DataFrame."""
     def __init__(self, url: str, get_floorplans: bool = False):
@@ -165,7 +163,6 @@ class RightmoveData:
             if not href:
                 href = c.xpath(".//a[contains(@href,'/properties/')]/@href")
             url = f"{base}{href[0]}" if href else None
-
             pid = None
             if url:
                 m2 = re.search(r"/properties/(\d+)", url)
@@ -337,7 +334,7 @@ class RightmoveCog(commands.Cog):
     async def rm_cleanup(self, ctx):
         """Manually run cleanup of vanished channels."""
         await ctx.send("🔄 Running manual cleanup…")
-        count = await self._cleanup_old(ctx.guild)
+        count = await self._cleanup_old()
         await ctx.send(f"✅ Cleanup done, removed {count} channel(s).")
         await self._log(f"Manual cleanup removed {count} channel(s)")
 
@@ -508,28 +505,12 @@ class RightmoveCog(commands.Cog):
                 if ch:
                     await self._send_or_edit(ch, pid, r, event="refresh", cache=cache)
 
-        # Cleanup old & orphan channels
-        await self._cleanup_old(guild)
+        # Cleanup old vanished channels
+        await self._cleanup_old()
 
         # Reorder
         await self._reorder_channels()
         await self._log("Scrape run completed and channels reordered")
-
-    async def _fetch_description(self, url: str) -> str:
-        """Fetch the property's detail page and extract its description."""
-        try:
-            r = requests.get(
-                url,
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=8
-            )
-            tree = html.fromstring(r.content)
-            # Adjust this XPath if Rightmove changes their markup
-            paragraphs = tree.xpath("//div[contains(@class,'property-description')]//p//text()")
-            text = " ".join([p.strip() for p in paragraphs]).strip()
-            return text or "No description available."
-        except Exception:
-            return "No description available."
 
     async def _send_or_edit(
         self,
@@ -568,8 +549,8 @@ class RightmoveCog(commands.Cog):
             else:
                 prefix_emoji = "🔴" if event == "vanished" else "🟢"
 
-            # rebuild channel name from base to avoid duplicates
-            base_name = ch.name.split(" ", 1)[0]
+            # update channel name emoji
+            base_name = ch.name.split(" ",1)[0]
             new_name = f"{base_name} {prefix_emoji}"
             try:
                 await ch.edit(name=new_name)
@@ -584,13 +565,6 @@ class RightmoveCog(commands.Cog):
             embed = discord.Embed(title=title, color=color, description=desc)
             if r["image_url"]:
                 embed.set_image(url=r["image_url"])
-
-            # add the scraped description
-            if r.get("url"):
-                raw_desc = await self._fetch_description(r["url"])
-                if len(raw_desc) > MAX_DESC_FIELD:
-                    raw_desc = raw_desc[: MAX_DESC_FIELD - 3] + "..."
-                embed.add_field(name="📝 Description", value=raw_desc, inline=False)
 
             embed.add_field(name="💷 Price", value=f"£{int(price):,}", inline=True)
             beds = r.get("number_bedrooms")
@@ -619,9 +593,8 @@ class RightmoveCog(commands.Cog):
                 description="This property has vanished from the search.",
             )
             # mark red and channel
-            base_name = ch.name.split(" ", 1)[0]
             try:
-                await ch.edit(name=f"{base_name} 🔴")
+                await ch.edit(name=f"{ch.name.split()[0]} 🔴")
             except:
                 pass
 
@@ -642,53 +615,28 @@ class RightmoveCog(commands.Cog):
             await self.config.properties.set(local_cache)
             await self._log(f"Sent embed (after error) in {ch.mention} for {pid}")
 
-    async def _cleanup_old(self, guild: discord.Guild) -> int:
-        """Delete channels for properties vanished > cleanup_days ago,
-           and also orphan channels not in cache."""
+    async def _cleanup_old(self) -> int:
+        """Delete channels for properties vanished > cleanup_days ago."""
         cache = await self.config.properties()
         settings = await self.config.settings()
         days = settings.get("cleanup_days", 7)
         threshold = time.time() - days * 86400
-
-        to_delete_pids = []
-        deleted_count = 0
-
-        # 1) Clean up vanished entries in cache
+        to_delete = []
         for pid, data in list(cache.items()):
             if not data.get("active", True) and data.get("vanished_ts") and data["vanished_ts"] < threshold:
-                ch = guild.get_channel(data["channel_id"])
+                ch = self.bot.get_channel(data["channel_id"])
                 if ch:
-                    await ch.delete()
-                    deletion_ts = int(time.time())
-                    await self._log(f"Deleted channel {ch.name} for vanished {pid} at <t:{deletion_ts}:F>")
-                    deleted_count += 1
-                to_delete_pids.append(pid)
-
-        for pid in to_delete_pids:
-            cache.pop(pid, None)
-
-        # 2) Sweep orphan channels (named prop-XXX but not in cache)
-        for cat in guild.categories:
-            if not cat.name.startswith(CATEGORY_PREFIX):
-                continue
-            for ch in cat.channels:
-                if not isinstance(ch, discord.TextChannel):
-                    continue
-                if not ch.name.startswith("prop-"):
-                    continue
-                pid = ch.name.split("-", 1)[1]
-                if pid not in cache:
-                    # use channel creation time
-                    created_ts = ch.created_at.replace(tzinfo=datetime.timezone.utc).timestamp()
-                    if created_ts < threshold:
+                    try:
                         await ch.delete()
-                        deletion_ts = int(time.time())
-                        await self._log(f"Deleted orphan channel {ch.name} at <t:{deletion_ts}:F>")
-                        deleted_count += 1
-
-        if to_delete_pids:
+                        await self._log(f"Deleted channel {ch.name} for vanished {pid}")
+                    except:
+                        pass
+                to_delete.append(pid)
+        for pid in to_delete:
+            cache.pop(pid, None)
+        if to_delete:
             await self.config.properties.set(cache)
-        return deleted_count
+        return len(to_delete)
 
     async def _reorder_channels(self):
         guild = self.target_channel.guild
