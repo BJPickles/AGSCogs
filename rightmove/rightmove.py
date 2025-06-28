@@ -27,7 +27,7 @@ SCRAPE_TIME          = dt_time(hour=7, minute=0, tzinfo=LONDON)
 TARGET_PRICE         = 250_000
 IDEAL_DELTA          =   3_000
 
-# exact‐match banned property types (lowercase)
+# exact-match banned property types (lowercase)
 BANNED_PROPERTY_TYPES = {
     "studio",
     "land",
@@ -39,7 +39,7 @@ BANNED_PROPERTY_TYPES = {
     "parking",
 }
 
-# substring‐based banned descriptors (lowercase)
+# substring-based banned descriptors (lowercase)
 BANNED_TYPE_SUBSTRINGS = [
     "leasehold", "lease hold", "lease-hold",
     "sharedownership", "shared ownership", "shared-ownership",
@@ -373,10 +373,72 @@ class RightmoveCog(commands.Cog):
         await ctx.send("✅ Manual scrape done.")
         await self._log("Manual scrape completed")
 
+    # NEW: fetch full description from the property detail page
+    async def _fetch_property_description(self, url: str) -> str:
+        """Fetches the full property description from the detail page."""
+        sc, content = RightmoveData._request(url)
+        if sc != 200 or not content:
+            return ""
+        tree = html.fromstring(content)
+        # Attempt to grab paragraph text under the main description container
+        nodes = tree.xpath("//div[@data-testid='property-description']//p/text()")
+        desc = " ".join(n.strip() for n in nodes if n and n.strip())
+        if not desc:
+            # Fallback to meta description if structured paragraphs missing
+            meta = tree.xpath("//meta[@name='description']/@content")
+            desc = meta[0].strip() if meta else ""
+        return desc
+
+    # UPDATED: now prunes *all* prop-<id> channels that are either uncached or inactive
+    async def _prune_vanished_channels(self) -> int:
+        """Delete all channels in RIGHTMOVE categories that are vanished or uncached."""
+        cache = await self.config.properties()
+        guild = self.target_channel.guild
+        to_delete = []
+        # scan every RIGHTMOVE category
+        for cat in guild.categories:
+            if not cat.name.startswith(CATEGORY_PREFIX):
+                continue
+            for ch in list(cat.channels):
+                if not isinstance(ch, discord.TextChannel):
+                    continue
+                name = ch.name
+                # match channels named prop-<digits> plus optional emoji
+                m = re.match(r"^(prop-(\d+))(?: \S+)?$", name)
+                if not m:
+                    continue
+                base, pid = m.group(1), m.group(2)
+                entry = cache.get(pid)
+                # prune if unknown or marked inactive
+                if not entry or not entry.get("active", True):
+                    to_delete.append((pid, ch))
+        pruned = 0
+        for pid, ch in to_delete:
+            ch_name = ch.name
+            try:
+                await ch.delete()
+                ts = int(time.time())
+                await self._log(
+                    f"Deleted channel {ch_name} for pid {pid} at <t:{ts}:F>"
+                )
+            except:
+                pass
+            if pid in cache:
+                cache.pop(pid, None)
+            pruned += 1
+        if pruned:
+            await self.config.properties.set(cache)
+        return pruned
+
     async def do_scrape(self, force_refresh: bool = False):
         if self._halt:
             await self._log("Scrape aborted by halt flag")
             return
+
+        # 4. Autoprune any vanished or uncached channels before we begin
+        pruned_count = await self._prune_vanished_channels()
+        if pruned_count:
+            await self._log(f"Auto-pruned {pruned_count} channel(s) before scrape")
 
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
@@ -408,6 +470,7 @@ class RightmoveCog(commands.Cog):
             await self._log(msg)
             return
 
+        # apply filters
         df = df[df["type"].notna()]
         df = df[~df["type"].str.lower().apply(
             lambda t: any(sub in t for sub in BANNED_TYPE_SUBSTRINGS)
@@ -437,6 +500,7 @@ class RightmoveCog(commands.Cog):
             stc_changed   = r["is_stc"] and not old.get("is_stc", False)
 
             if is_new:
+                # find or create category
                 for cat in existing_cats:
                     if len(cat.channels) < MAX_PER_CATEGORY:
                         target_cat = cat
@@ -493,9 +557,10 @@ class RightmoveCog(commands.Cog):
                     cache[pid]["vanished_ts"]= now_ts
                     await self._send_or_edit(ch, pid, None, event="vanished", cache=cache)
 
+        # persist active/vanished changes
         await self.config.properties.set(cache)
 
-        # Force‐refresh
+        # Force-refresh if requested
         if force_refresh:
             for pid, r in new_props.items():
                 data2 = cache.get(pid, {})
@@ -505,13 +570,14 @@ class RightmoveCog(commands.Cog):
                 if ch:
                     await self._send_or_edit(ch, pid, r, event="refresh", cache=cache)
 
-        # Cleanup old vanished channels
+        # cleanup by age
         await self._cleanup_old()
 
-        # Reorder
+        # reorder
         await self._reorder_channels()
         await self._log("Scrape run completed and channels reordered")
 
+    # ---------- modified to strip all old emojis & add description field ----------
     async def _send_or_edit(
         self,
         ch: discord.TextChannel,
@@ -533,6 +599,7 @@ class RightmoveCog(commands.Cog):
 
         if r is not None:
             price = r["price"]
+            # choose embed color & status-emoji
             if color is None:
                 if abs(price - TARGET_PRICE) <= IDEAL_DELTA:
                     color = discord.Color.blue()
@@ -549,14 +616,16 @@ class RightmoveCog(commands.Cog):
             else:
                 prefix_emoji = "🔴" if event == "vanished" else "🟢"
 
-            # update channel name emoji
-            base_name = ch.name.split(" ",1)[0]
+            # strip ALL old emojis by capturing only "prop-<id>"
+            m = re.match(r"^(prop-\d+)", ch.name)
+            base_name = m.group(1) if m else ch.name.split()[0]
             new_name = f"{base_name} {prefix_emoji}"
             try:
                 await ch.edit(name=new_name)
             except:
                 pass
 
+            # build embed
             title = r["address"] if event == "refresh" else f"{emoji} {pre} — {r['address']}"
             desc = (
                 f"Listed: <t:{r['listed_ts']}:F> (<t:{r['listed_ts']}:R>)\n"
@@ -585,6 +654,13 @@ class RightmoveCog(commands.Cog):
                     value=f"[View on Rightmove]({r['url']})",
                     inline=False,
                 )
+                # 3. Fetch & truncate description for the embed
+                full_desc = await self._fetch_property_description(r["url"])
+                if full_desc:
+                    if len(full_desc) > 1021:
+                        full_desc = full_desc[:1021] + "..."
+                    embed.add_field(name="📝 Description", value=full_desc, inline=False)
+
         else:
             emoji2, pre2, color2 = emojis["vanished"]
             embed = discord.Embed(
@@ -592,12 +668,15 @@ class RightmoveCog(commands.Cog):
                 color=color2,
                 description="This property has vanished from the search.",
             )
-            # mark red and channel
+            # strip any old emoji and mark 🔴
+            m = re.match(r"^(prop-\d+)", ch.name)
+            base_name = m.group(1) if m else ch.name.split()[0]
             try:
-                await ch.edit(name=f"{ch.name.split()[0]} 🔴")
+                await ch.edit(name=f"{base_name} 🔴")
             except:
                 pass
 
+        # send or edit the embed message
         msg_id = data.get("message_id")
         try:
             if msg_id:
