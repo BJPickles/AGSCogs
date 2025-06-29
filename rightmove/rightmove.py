@@ -376,7 +376,8 @@ class RightmoveCog(commands.Cog):
     # NEW: fetch full description from the property detail page
     async def _fetch_property_description(self, url: str) -> str:
         """Fetches the full property description from the detail page."""
-        sc, content = RightmoveData._request(url)
+        # <<< CHANGED: offload blocking HTTP into a thread
+        sc, content = await asyncio.to_thread(RightmoveData._request, url)
         if sc != 200 or not content:
             return ""
         tree = html.fromstring(content)
@@ -456,7 +457,8 @@ class RightmoveCog(commands.Cog):
             "&propertyTypes=detached%2Csemi-detached"
             "&index=0&minBathrooms=1&minBedrooms=3"
         )
-        data = RightmoveData(url)
+        # <<< CHANGED: offload entire blocking scrape into a thread
+        data = await asyncio.to_thread(RightmoveData, url)
         if data._status_code != 200:
             msg = f"❌ HTTP {data._status_code}, aborting."
             await self.target_channel.send(msg)
