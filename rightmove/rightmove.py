@@ -6,10 +6,10 @@ import math
 from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 
-from lxml import html
 import numpy as np
 import pandas as pd
 import requests
+from lxml import html
 
 import discord
 from discord.ext import tasks
@@ -32,12 +32,13 @@ TIER_THRESHOLDS = [
 ]
 TIER_FALLBACK = ("🔴", discord.Color.red())
 
-# banned property types (exact match, lowercase)
+# exact-match banned property types (lowercase)
 BANNED_PROPERTY_TYPES = {
-    "studio", "land", "mobile home", "park home", "caravan", "garage", "garages", "parking", "flat", "maisonette", "plot",
+    "studio", "land", "mobile home", "park home", "caravan",
+    "garage", "garages", "parking", "flat", "maisonette", "plot",
 }
 
-# banned substrings in property type (lowercase)
+# substring-based banned descriptors (lowercase)
 BANNED_TYPE_SUBSTRINGS = [
     "leasehold", "lease hold", "lease-hold",
     "sharedownership", "shared ownership", "shared-ownership",
@@ -152,8 +153,8 @@ class RightmoveData:
 
             stc = bool(
                 c.xpath(
-                    ".//span[contains(text(),'STC')"
-                    " or contains(text(),'Subject to contract')]"
+                    ".//span[contains(text(),'STC') or "
+                    "contains(text(),'Subject to contract')]"
                 )
             )
 
@@ -288,7 +289,7 @@ class RightmoveCog(commands.Cog):
         if days < 0:
             return await ctx.send("❌ Days must be non-negative.")
         await self.config.settings.set_raw("cleanup_days", value=days)
-        await ctx.send(f"✅ Cleanup days set to {days}")
+        await ctx.send(f"✅ Cleanup interval set to {days} day(s).")
 
     @rm.command(name="start")
     async def rm_start(self, ctx, channel: discord.TextChannel = None):
@@ -319,6 +320,7 @@ class RightmoveCog(commands.Cog):
 
     @rm.command(name="cleanup")
     async def rm_cleanup(self, ctx):
+        """Delete any orphan channels (invalid/missing PIDs)."""
         await ctx.send("🔄 Running orphan cleanup…")
         count = await self._cleanup_orphans()
         await ctx.send(f"✅ Removed {count} orphan channel(s).")
@@ -363,9 +365,10 @@ class RightmoveCog(commands.Cog):
 
     async def do_scrape(self, force_refresh: bool = False):
         if self._halt:
-            await self._log("Scrape halted")
+            await self._log("Scrape halted by flag")
             return
 
+        # 1) SCRAPE
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
             "sortType=1&viewType=LIST&channel=BUY"
@@ -398,12 +401,14 @@ class RightmoveCog(commands.Cog):
             await self._log(msg)
             return
 
+        # 2) FILTER
         df = df[df["type"].notna()]
         df = df[~df["type"].str.lower().apply(
             lambda t: any(sub in t for sub in BANNED_TYPE_SUBSTRINGS)
         )]
         df = df[~df["type"].str.lower().isin(BANNED_PROPERTY_TYPES)]
 
+        # 3) LOAD CACHE & DIFF
         cache   = await self.config.properties()
         old_ids = set(cache.keys())
         rows    = list(df.to_dict("records"))
@@ -418,6 +423,7 @@ class RightmoveCog(commands.Cog):
         cats  = [c for c in guild.categories if c.name.startswith(CATEGORY_PREFIX)]
         cats.sort(key=lambda c: int(c.name.split()[-1]) if c.name.split()[-1].isdigit() else 0)
 
+        # 4) CREATE
         for pid in to_create:
             r = new_props[pid]
             for cat in cats:
@@ -432,20 +438,21 @@ class RightmoveCog(commands.Cog):
                 await self._log(f"Created category {target_cat.name}")
 
             ch = await guild.create_text_channel(f"prop-{pid}", category=target_cat)
-            embed, tier_emoji = await self._build_embed(r, event="new")
+            embed, tier = await self._build_embed(r, event="new")
             msg = await ch.send(embed=embed)
-            await ch.edit(name=f"prop-{pid} {tier_emoji}")
+            await ch.edit(name=f"prop-{pid} {tier}")
             cache[pid] = {
-                "channel_id":  ch.id,
-                "message_id":  msg.id,
-                "price":       r["price"],
-                "listed_ts":   r["listed_ts"],
-                "updated_ts":  r["updated_ts"],
-                "is_stc":      r["is_stc"],
-                "active":      True,
+                "channel_id": ch.id,
+                "message_id": msg.id,
+                "price": r["price"],
+                "listed_ts": r["listed_ts"],
+                "updated_ts": r["updated_ts"],
+                "is_stc": r["is_stc"],
+                "active": True,
             }
             await self._log(f"Created prop-{pid}")
 
+        # 5) UPDATE
         for pid in to_update:
             r   = new_props[pid]
             old = cache[pid]
@@ -459,8 +466,8 @@ class RightmoveCog(commands.Cog):
                 continue
 
             event = "stc" if stc_changed else "price_update"
-            embed, tier_emoji = await self._build_embed(r, event=event)
-            await ch.edit(name=f"prop-{pid} {tier_emoji}")
+            embed, tier = await self._build_embed(r, event=event)
+            await ch.edit(name=f"prop-{pid} {tier}")
             try:
                 msg = await ch.fetch_message(old["message_id"])
                 await msg.edit(embed=embed)
@@ -474,6 +481,7 @@ class RightmoveCog(commands.Cog):
             })
             await self._log(f"Updated prop-{pid} ({event})")
 
+        # 6) REMOVE vanished
         for pid in to_remove:
             old = cache[pid]
             ch = guild.get_channel(old["channel_id"])
@@ -485,6 +493,7 @@ class RightmoveCog(commands.Cog):
                     pass
             cache.pop(pid, None)
 
+        # 7) DELETE ORPHANS
         for cat in cats:
             for ch in list(cat.channels):
                 if not isinstance(ch, discord.TextChannel):
@@ -497,6 +506,39 @@ class RightmoveCog(commands.Cog):
                     except:
                         pass
 
+        # 8) GLOBAL REBALANCE ACROSS CATEGORIES
+        active = []
+        for cat in cats:
+            for ch in cat.channels:
+                if not isinstance(ch, discord.TextChannel):
+                    continue
+                m = re.match(r"^prop-(\d+)", ch.name)
+                if not m:
+                    continue
+                pid = m.group(1)
+                prop = cache.get(pid)
+                if not prop:
+                    continue
+                active.append((prop["price"], pid, ch))
+        active.sort(key=lambda x: x[0])
+        needed = math.ceil(len(active) / MAX_PER_CATEGORY)
+        nums = [int(c.name.split()[-1]) for c in cats if c.name.split()[-1].isdigit()]
+        next_num = max(nums) + 1 if nums else 1
+        for _ in range(needed - len(cats)):
+            new_cat = await guild.create_category(f"{CATEGORY_PREFIX} {next_num}")
+            next_num += 1
+            cats.append(new_cat)
+            await self._log(f"Created category {new_cat.name}")
+        for idx, (_, pid, ch) in enumerate(active):
+            target_cat = cats[idx // MAX_PER_CATEGORY]
+            if ch.category_id != target_cat.id:
+                try:
+                    await ch.edit(category=target_cat)
+                    await self._log(f"Moved prop-{pid} to {target_cat.name}")
+                except:
+                    pass
+
+        # 9) REORDER within each category
         for cat in cats:
             items = []
             for ch in cat.channels:
@@ -521,18 +563,18 @@ class RightmoveCog(commands.Cog):
                 except:
                     pass
 
+        # 10) PERSIST
         await self.config.properties.set(cache)
         await self._log("Scrape complete and cache persisted")
 
     async def _build_embed(self, r: dict, event: str):
         emojis = {
             "new":          ("🆕",    "New",           None),
-            "price_update": ("🔄",    "Price Updated", None),
+            "price_update": ("🔄",    "Price Updated", None),  
             "stc":          ("💖",    "[STC]",         discord.Color.magenta()),
         }
         emoji, label, color = emojis[event]
         price = r["price"]
-
         tier_emoji = None
         for threshold, t_emoji, t_color in TIER_THRESHOLDS:
             if price <= threshold:
@@ -555,10 +597,7 @@ class RightmoveCog(commands.Cog):
             embed.set_image(url=r["image_url"])
         embed.add_field(name="💷 Price", value=f"£{int(price):,}", inline=True)
         beds = r.get("number_bedrooms")
-        beds_str = (
-            str(int(beds)) if isinstance(beds, (int, float)) and not math.isnan(beds)
-            else "N/A"
-        )
+        beds_str = str(int(beds)) if isinstance(beds, (int, float)) and not math.isnan(beds) else "N/A"
         embed.add_field(name="🛏 Bedrooms", value=beds_str, inline=True)
         embed.add_field(name="🏠 Type", value=r["type"], inline=True)
         if r.get("agent") and r.get("agent_url"):
