@@ -34,7 +34,7 @@ TIER_FALLBACK = ("🔴", discord.Color.red())
 
 # banned property types (exact match, lowercase)
 BANNED_PROPERTY_TYPES = {
-    "studio", "land", "mobile home", "park home", "caravan", "garage", "garages", "parking",
+    "studio", "land", "mobile home", "park home", "caravan", "garage", "garages", "parking", "flat", "maisonette", "plot",
 }
 
 # banned substrings in property type (lowercase)
@@ -47,6 +47,7 @@ BANNED_TYPE_SUBSTRINGS = [
     "mobile home", "mobile-home", "mobilehome",
     "caravan", "caravans",
     "not specified", "not-specified", "notspecified",
+    "non-standard", "non standard",
 ]
 
 
