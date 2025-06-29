@@ -450,8 +450,11 @@ class RightmoveCog(commands.Cog):
             "Ncq_%40crl%40uvO%7Dc%7C%40jTozbAlvMadq%40fu%5Bas"
             "Zpmi%40%7BeMjgf%40jdEhpJt%7BZ_%60Jlpz%40%22%7D"
             "&tenureTypes=FREEHOLD&transactionType=BUY"
-            "&mustHave=parking"
+            "&mustHave=parking%2Cgarden"
             "&dontShow=newHome%2Cretirement%2CsharedOwnership%2Cauction"
+            "&displayLocationIdentifier=undefined"
+            "&propertyTypes=detached%2Csemi-detached"
+            "&index=0&minBathrooms=1&minBedrooms=3"
         )
         data = RightmoveData(url)
         if data._status_code != 200:
