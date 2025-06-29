@@ -31,11 +31,13 @@ TIER_THRESHOLDS = [
 ]
 TIER_FALLBACK = ("🔴", discord.Color.red())
 
-# banned types
+# exact-match banned property types (lowercase)
 BANNED_PROPERTY_TYPES = {
-    "studio", "land", "mobile home", "park home", "caravan",
-    "garage", "garages", "parking", "flat", "maisonette", "plot",
+    "studio", "land", "mobile home", "park home",
+    "caravan", "garage", "garages", "parking", "flat", "maisonette", "plot",
 }
+
+# substring-based banned descriptors (lowercase)
 BANNED_TYPE_SUBSTRINGS = [
     "leasehold", "lease hold", "lease-hold",
     "sharedownership", "shared ownership", "shared-ownership",
@@ -49,12 +51,10 @@ BANNED_TYPE_SUBSTRINGS = [
 ]
 
 def _get_tier_emoji(price: float) -> str:
-    """Return the correct tier emoji for a given price."""
     for threshold, emoji, _ in TIER_THRESHOLDS:
         if price <= threshold:
             return emoji
     return TIER_FALLBACK[0]
-
 
 class RightmoveData:
     """Scrapes Rightmove search results and returns a DataFrame."""
@@ -67,11 +67,13 @@ class RightmoveData:
     def _request(url: str):
         r = requests.get(
             url,
-            headers={"User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/115.0.0 Safari/537.36"
-            )},
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/115.0.0 Safari/537.36"
+                )
+            },
             timeout=10,
         )
         return r.status_code, r.content
@@ -101,7 +103,8 @@ class RightmoveData:
         m = re.search(r"(\d{2})/(\d{2})/(\d{4})", t)
         if m:
             d, mo, y = map(int, m.groups())
-            return int(datetime.datetime(y, mo, d, tzinfo=LONDON).timestamp())
+            dt = datetime.datetime(y, mo, d, tzinfo=LONDON)
+            return int(dt.timestamp())
         return now
 
     def _get_page(self, content: bytes, get_floorplans: bool) -> pd.DataFrame:
@@ -116,12 +119,17 @@ class RightmoveData:
                 "[contains(@class,'PropertyPrice_price__')]/text()"
             )
             price_raw = pr[0].strip() if pr else None
+
             ad = c.xpath(".//*[@data-testid='property-address']//address/text()")
             address = ad[0].strip() if ad else None
+
             tp = c.xpath(
                 ".//span[contains(@class,'PropertyInformation_propertyType')]/text()"
-            ) or c.xpath(".//div[@data-testid='property-information']//span/text()")
+            ) or c.xpath(
+                ".//div[@data-testid='property-information']//span/text()"
+            )
             ptype = tp[0].strip() if tp else None
+
             bd = c.xpath(
                 ".//span[contains(@class,'PropertyInformation_bedroomsCount')]/text()"
             )
@@ -129,6 +137,7 @@ class RightmoveData:
                 beds = float(bd[0]) if bd else None
             except ValueError:
                 beds = None
+
             ld = c.xpath(
                 ".//span[contains(@class,'MarketedBy_joinedText')]/text()"
             ) or [None]
@@ -137,17 +146,25 @@ class RightmoveData:
             ) or [None]
             listed_ts = self._parse_date(ld[0])
             updated_ts = self._parse_date(ud[0])
-            stc = bool(c.xpath(".//span[contains(text(),'STC') or contains(text(),'Subject to contract')]"))
-            href = c.xpath(".//a[@data-test='property-details']/@href") or []
+
+            stc = bool(
+                c.xpath(
+                    ".//span[contains(text(),'STC')"
+                    " or contains(text(),'Subject to contract')]"
+                )
+            )
+
+            href = c.xpath(".//a[@data-test='property-details']/@href")
             if not href:
-                href = c.xpath(".//a[@data-testid='property-details-lozenge']/@href") or []
+                href = c.xpath(".//a[@data-testid='property-details-lozenge']/@href")
             if not href:
-                href = c.xpath(".//a[contains(@href,'/properties/')]/@href") or []
+                href = c.xpath(".//a[contains(@href,'/properties/')]/@href")
             url = f"{base}{href[0]}" if href else None
             pid = None
             if url:
                 m2 = re.search(r"/properties/(\d+)", url)
                 pid = m2.group(1) if m2 else None
+
             img_el = c.xpath(".//img[@data-testid='property-img-1']") or []
             if img_el:
                 srcset = img_el[0].get("srcset", "")
@@ -160,10 +177,11 @@ class RightmoveData:
                 img_url = None
             if img_url and img_url.startswith("//"):
                 img_url = "https:" + img_url
+
             an = c.xpath(
                 ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]//img/@alt"
             )
-            agent = an[0].replace(" Estate Agent Logo","").strip() if an else None
+            agent = an[0].replace(" Estate Agent Logo", "").strip() if an else None
             au = c.xpath(
                 ".//div[contains(@class,'PropertyCard_propertyCardEstateAgent')]//a/@href"
             )
@@ -185,18 +203,18 @@ class RightmoveData:
             })
 
         columns = [
-            "id","price","address","type",
-            "number_bedrooms","listed_ts","updated_ts",
-            "is_stc","url","image_url","agent","agent_url"
+            "id", "price", "address", "type",
+            "number_bedrooms", "listed_ts", "updated_ts",
+            "is_stc", "url", "image_url", "agent", "agent_url",
         ]
         df = pd.DataFrame.from_records(rows, columns=columns)
         df["price"] = (
             df["price"]
-              .replace(r"\D+","",regex=True)
-              .replace("",np.nan)
+              .replace(r"\D+", "", regex=True)
+              .replace("", np.nan)
               .astype(float)
         )
-        df = df.dropna(subset=["id","price","address"])
+        df = df.dropna(subset=["id", "price", "address"])
         df.reset_index(drop=True, inplace=True)
         return df
 
@@ -204,17 +222,16 @@ class RightmoveData:
         df = self._get_page(self._first_page, get_floorplans)
         page = 1
         while True:
-            u = f"{self._url}&index={page*24}"
+            u = f"{self._url}&index={page * 24}"
             sc, ct = self._request(u)
             if sc != 200:
                 break
             tmp = self._get_page(ct, get_floorplans)
             if tmp.empty:
                 break
-            df = pd.concat([df,tmp],ignore_index=True)
+            df = pd.concat([df, tmp], ignore_index=True)
             page += 1
         return df
-
 
 class RightmoveCog(commands.Cog):
     """A cog that scrapes Rightmove daily and manages prop-<pid> channels."""
@@ -224,57 +241,64 @@ class RightmoveCog(commands.Cog):
         self.config = Config.get_conf(self, identifier=1234567890)
         self.config.register_global(
             properties={},
-            settings={"cleanup_days":7,"log_channel_id":None},
+            settings={"cleanup_days": 7, "log_channel_id": None},
         )
-        self.scrape_loop=None
-        self.target_channel=None
-        self._last_test=0.0
-        self._halt=False
-        self._lock=asyncio.Lock()
+        self.scrape_loop    = None
+        self.target_channel = None
+        self._last_test     = 0.0
+        self._halt          = False
+        self._lock          = asyncio.Lock()
 
     def cog_unload(self):
         if self.scrape_loop and self.scrape_loop.is_running():
             self.scrape_loop.cancel()
 
-    async def _log(self, message:str):
-        settings=await self.config.settings()
-        ch_id=settings.get("log_channel_id")
+    async def _log(self, message: str):
+        settings = await self.config.settings()
+        ch_id    = settings.get("log_channel_id")
         if ch_id:
-            ch=self.bot.get_channel(ch_id)
-            if isinstance(ch,discord.TextChannel):
-                try: await ch.send(f"[RightmoveCog] {message}")
-                except: pass
+            ch = self.bot.get_channel(ch_id)
+            if isinstance(ch, discord.TextChannel):
+                try:
+                    await ch.send(f"[RightmoveCog] {message}")
+                except:
+                    pass
 
     @commands.is_owner()
     @commands.group(name="rm", invoke_without_command=True)
     async def rm(self, ctx):
+        """Rightmove commands: start, stop, test, cleanup, setlog, setcleanup, abort"""
         await ctx.send_help(ctx.command)
 
     @rm.command(name="setlog")
-    async def rm_setlog(self,ctx,channel:discord.TextChannel=None):
-        cid=channel.id if channel else None
-        await self.config.settings.set_raw("log_channel_id",value=cid)
-        await ctx.send(f"✅ Log channel set to {channel.mention}" if channel else "✅ Log unset")
+    async def rm_setlog(self, ctx, channel: discord.TextChannel = None):
+        cid = channel.id if channel else None
+        await self.config.settings.set_raw("log_channel_id", value=cid)
+        if channel:
+            await ctx.send(f"✅ Log channel set to {channel.mention}")
+        else:
+            await ctx.send("✅ Log channel unset")
 
     @rm.command(name="setcleanup")
-    async def rm_setcleanup(self,ctx,days:int):
-        if days<0: return await ctx.send("❌ non-negative only")
-        await self.config.settings.set_raw("cleanup_days",value=days)
-        await ctx.send(f"✅ Cleanup interval {days}d")
+    async def rm_setcleanup(self, ctx, days: int):
+        if days < 0:
+            return await ctx.send("❌ Days must be non-negative.")
+        await self.config.settings.set_raw("cleanup_days", value=days)
+        await ctx.send(f"✅ Cleanup interval set to {days} day(s).")
 
     @rm.command(name="start")
-    async def rm_start(self,ctx,channel:discord.TextChannel=None):
+    async def rm_start(self, ctx, channel: discord.TextChannel = None):
         if self.scrape_loop and self.scrape_loop.is_running():
             return await ctx.send("❌ Already scheduled.")
-        self.target_channel=channel or ctx.channel
-        self._halt=False
-        self.scrape_loop=tasks.loop(time=SCRAPE_TIME)(self.do_scrape)
+        self.target_channel = channel or ctx.channel
+        self._halt          = False
+        self.scrape_loop    = tasks.loop(time=SCRAPE_TIME)(self.do_scrape)
         self.scrape_loop.start()
         await ctx.send(f"✅ Scheduled daily scrape in {self.target_channel.mention}")
         await self._log(f"Scheduled scrape in {self.target_channel.mention}")
 
     @rm.command(name="stop")
-    async def rm_stop(self,ctx):
+    async def rm_stop(self, ctx):
         if not self.scrape_loop or not self.scrape_loop.is_running():
             return await ctx.send("❌ No scrape scheduled.")
         self.scrape_loop.cancel()
@@ -282,58 +306,65 @@ class RightmoveCog(commands.Cog):
         await self._log("Scrape unscheduled")
 
     @rm.command(name="abort")
-    async def rm_abort(self,ctx):
-        self._halt=True
+    async def rm_abort(self, ctx):
+        self._halt = True
         if self.scrape_loop and self.scrape_loop.is_running():
             self.scrape_loop.cancel()
-        await ctx.send("🛑 Aborted. `.rm start` to resume.")
-        await self._log("Scrape aborted")
+        await ctx.send("🛑 Scrape aborted and halted.")
+        await self._log("Scrape aborted and halted")
 
     @rm.command(name="cleanup")
-    async def rm_cleanup(self,ctx):
-        await ctx.send("🔄 Orphan cleanup…")
-        count=await self._cleanup_orphans()
-        await ctx.send(f"✅ Removed {count} orphan(s).")
-        await self._log(f"Manual orphan cleanup removed {count}")
+    async def rm_cleanup(self, ctx):
+        """Delete orphan channels (invalid/missing pids)."""
+        await ctx.send("🔄 Running orphan cleanup…")
+        count = await self._cleanup_orphans()
+        await ctx.send(f"✅ Removed {count} orphan channel(s).")
+        await self._log(f"Manual orphan cleanup removed {count} channel(s)")
 
     @rm.command(name="test")
-    async def rm_test(self,ctx,*args):
-        override="override" in [a.lower() for a in args]
-        channel=None
+    async def rm_test(self, ctx, *args):
+        override = "override" in [a.lower() for a in args]
+        channel  = None
         for arg in args:
-            if arg.lower()=="override": continue
-            try: channel=await TextChannelConverter().convert(ctx,arg)
-            except BadArgument: pass
-        self.target_channel=channel or self.target_channel or ctx.channel
-        now=time.time()
+            if arg.lower() == "override":
+                continue
+            try:
+                channel = await TextChannelConverter().convert(ctx, arg)
+            except BadArgument:
+                pass
+        self.target_channel = channel or self.target_channel or ctx.channel
+        now = time.time()
         if self._lock.locked() and not override:
-            return await ctx.send("❌ Rebuild in progress.")
-        if (now-self._last_test)<300 and not override:
-            return await ctx.send(f"❌ Wait {int(300-(now-self._last_test))}s or override.")
-        self._last_test=now
-        await ctx.send("🔄 Manual scrape…")
+            return await ctx.send("❌ Rebuild in progress. Use override.")
+        if (now - self._last_test) < 300 and not override:
+            rem = int(300 - (now - self._last_test))
+            return await ctx.send(f"❌ Wait {rem}s or use override.")
+        self._last_test = now
+        await ctx.send("🔄 Running manual scrape…")
         await self._log(f"Manual scrape by {ctx.author}")
         async with self._lock:
             await self.do_scrape(force_refresh=override)
-        await ctx.send("✅ Done.")
+        await ctx.send("✅ Manual scrape done.")
         await self._log("Manual scrape completed")
 
-    async def _fetch_property_description(self,url:str)->str:
-        sc,content=await asyncio.to_thread(RightmoveData._request,url)
-        if sc!=200 or not content: return ""
-        tree=html.fromstring(content)
-        nodes=tree.xpath("//div[@data-testid='property-description']//p/text()")
-        desc=" ".join(n.strip() for n in nodes if n and n.strip())
+    async def _fetch_property_description(self, url: str) -> str:
+        sc, content = await asyncio.to_thread(RightmoveData._request, url)
+        if sc != 200 or not content:
+            return ""
+        tree = html.fromstring(content)
+        nodes = tree.xpath("//div[@data-testid='property-description']//p/text()")
+        desc = " ".join(n.strip() for n in nodes if n and n.strip())
         if not desc:
-            meta=tree.xpath("//meta[@name='description']/@content")
-            desc=meta[0].strip() if meta else ""
+            meta = tree.xpath("//meta[@name='description']/@content")
+            desc = meta[0].strip() if meta else ""
         return desc
 
-    async def do_scrape(self,force_refresh:bool=False):
+    async def do_scrape(self, force_refresh: bool = False):
         if self._halt:
-            return await self._log("Scrape halted by flag")
+            await self._log("Scrape halted by flag")
+            return
 
-        # 1) Scrape
+        # 1) SCRAPE
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
             "sortType=1&viewType=LIST&channel=BUY"
@@ -349,185 +380,272 @@ class RightmoveCog(commands.Cog):
             "&dontShow=newHome%2Cretirement%2CsharedOwnership%2Cauction"
             "&minBedrooms=3"
         )
-        data=await asyncio.to_thread(RightmoveData,url)
-        if data._status_code!=200:
-            msg=f"❌ HTTP {data._status_code}, aborting."
+        data = await asyncio.to_thread(RightmoveData, url)
+        if data._status_code != 200:
+            msg = f"❌ HTTP {data._status_code}, aborting."
             await self.target_channel.send(msg)
-            return await self._log(msg)
+            await self._log(msg)
+            return
 
-        df=data.get_results
+        df = data.get_results
         if df.empty:
-            msg=f"⚠️ {data.results_count_display} results but empty DataFrame."
+            msg = (
+                f"⚠️ Scrape returned {data.results_count_display} results "
+                "but DataFrame is empty."
+            )
             await self.target_channel.send(msg)
-            return await self._log(msg)
+            await self._log(msg)
+            return
 
-        # 2) Filter
-        df=df[df["type"].notna()]
-        df=df[~df["type"].str.lower().apply(lambda t:any(sub in t for sub in BANNED_TYPE_SUBSTRINGS))]
-        df=df[~df["type"].str.lower().isin(BANNED_PROPERTY_TYPES)]
+        # 2) FILTER
+        df = df[df["type"].notna()]
+        df = df[~df["type"].str.lower().apply(
+            lambda t: any(sub in t for sub in BANNED_TYPE_SUBSTRINGS)
+        )]
+        df = df[~df["type"].str.lower().isin(BANNED_PROPERTY_TYPES)]
 
-        # 3) Diff
-        cache=await self.config.properties()
-        old_ids=set(cache)
-        rows=list(df.to_dict("records"))
-        new_props={r["id"]:r for r in rows}
-        new_ids=set(new_props)
-        to_create=new_ids-old_ids
-        to_update=new_ids&old_ids
-        to_remove=old_ids-new_ids
+        # 3) LOAD CACHE & DIFF
+        cache   = await self.config.properties()
+        old_ids = set(cache.keys())
+        rows    = list(df.to_dict("records"))
+        new_props = {r["id"]: r for r in rows}
+        new_ids   = set(new_props.keys())
 
-        guild=self.target_channel.guild
-        cats=[c for c in guild.categories if c.name.startswith(CATEGORY_PREFIX)]
-        cats.sort(key=lambda c:int(c.name.split()[-1]) if c.name.split()[-1].isdigit() else 0)
+        to_create = new_ids - old_ids
+        to_update = new_ids & old_ids
+        to_remove = old_ids - new_ids
 
-        # 4) Create
+        guild = self.target_channel.guild
+        cats  = [c for c in guild.categories if c.name.startswith(CATEGORY_PREFIX)]
+        cats.sort(key=lambda c: int(c.name.split()[-1]) if c.name.split()[-1].isdigit() else 0)
+
+        # 4) CREATE NEW CHANNELS
         for pid in to_create:
-            r=new_props[pid]
+            r = new_props[pid]
             for cat in cats:
-                if len(cat.channels)<MAX_PER_CATEGORY:
-                    target_cat=cat; break
+                if len(cat.channels) < MAX_PER_CATEGORY:
+                    target_cat = cat
+                    break
             else:
-                nums=[int(c.name.split()[-1]) for c in cats if c.name.split()[-1].isdigit()]
-                idx=max(nums)+1 if nums else 1
-                target_cat=await guild.create_category(f"{CATEGORY_PREFIX} {idx}")
+                nums = [int(c.name.split()[-1]) for c in cats if c.name.split()[-1].isdigit()]
+                idx = max(nums) + 1 if nums else 1
+                target_cat = await guild.create_category(f"{CATEGORY_PREFIX} {idx}")
                 cats.append(target_cat)
                 await self._log(f"Created category {target_cat.name}")
-            ch=await guild.create_text_channel(f"prop-{pid}",category=target_cat)
-            embed,tier=await self._build_embed(r,event="new")
-            msg=await ch.send(embed=embed)
+
+            ch = await guild.create_text_channel(f"prop-{pid}", category=target_cat)
+            embed, tier = await self._build_embed(r, event="new")
+            msg = await ch.send(embed=embed)
             await ch.edit(name=f"prop-{pid} {tier}")
-            cache[pid]={
-                "channel_id":ch.id,"message_id":msg.id,
-                "price":r["price"],"listed_ts":r["listed_ts"],
-                "updated_ts":r["updated_ts"],"is_stc":r["is_stc"],"active":True
+            cache[pid] = {
+                "channel_id":  ch.id,
+                "message_id":  msg.id,
+                "price":       r["price"],
+                "listed_ts":   r["listed_ts"],
+                "updated_ts":  r["updated_ts"],
+                "is_stc":      r["is_stc"],
+                "active":      True,
             }
             await self._log(f"Created prop-{pid}")
 
-        # 5) Update
+        # 5) UPDATE EXISTING CHANNELS (with tier-change)
         for pid in to_update:
-            r=new_props[pid]; old=cache[pid]
-            old_price, new_price=old["price"],r["price"]
-            old_tier,new_tier=_get_tier_emoji(old_price),_get_tier_emoji(new_price)
-            price_changed=(new_price!=old_price) or (new_tier!=old_tier)
-            stc_changed=r["is_stc"] and not old["is_stc"]
-            if not price_changed and not stc_changed: continue
-            ch=guild.get_channel(old["channel_id"])
-            if not ch: continue
-            event="stc" if stc_changed else "price_update"
-            embed,_=await self._build_embed(r,event=event)
+            r   = new_props[pid]
+            old = cache[pid]
+
+            old_price = old["price"]
+            new_price = r["price"]
+            old_tier  = _get_tier_emoji(old_price)
+            new_tier  = _get_tier_emoji(new_price)
+
+            # FORCE a rename/embed when override is True, or when price/tier changes
+            price_changed = force_refresh or (new_price != old_price) or (new_tier != old_tier)
+            stc_changed   = r["is_stc"] and not old["is_stc"]
+            if not price_changed and not stc_changed:
+                continue
+
+            ch = guild.get_channel(old["channel_id"])
+            if not ch:
+                continue
+
+            event = "stc" if stc_changed else "price_update"
+            embed, _ = await self._build_embed(r, event=event)
+
+            # rename the channel with the new tier emoji
             await ch.edit(name=f"prop-{pid} {new_tier}")
+
+            # edit or resend the embed
             try:
-                msg=await ch.fetch_message(old["message_id"])
+                msg = await ch.fetch_message(old["message_id"])
                 await msg.edit(embed=embed)
             except discord.NotFound:
-                msg=await ch.send(embed=embed)
-            old.update({"price":new_price,"updated_ts":r["updated_ts"],"is_stc":r["is_stc"]})
+                msg = await ch.send(embed=embed)
+
+            # update our cache
+            old.update({
+                "price":       new_price,
+                "updated_ts":  r["updated_ts"],
+                "is_stc":      r["is_stc"],
+            })
             await self._log(f"Updated prop-{pid} ({event})")
 
-        # 6) Remove vanished
+        # 6) DELETE VANISHED CHANNELS
         for pid in to_remove:
-            old=cache[pid]; ch=guild.get_channel(old["channel_id"])
+            old = cache[pid]
+            ch  = guild.get_channel(old["channel_id"])
             if ch:
-                try: await ch.delete(); await self._log(f"Deleted vanished prop-{pid}")
-                except: pass
-            cache.pop(pid,None)
+                try:
+                    await ch.delete()
+                    await self._log(f"Deleted vanished prop-{pid}")
+                except:
+                    pass
+            cache.pop(pid, None)
 
-        # 7) Delete orphans
+        # 7) DELETE ORPHAN CHANNELS
         for cat in cats:
             for ch in list(cat.channels):
-                if not isinstance(ch,discord.TextChannel): continue
-                m=re.match(r"^prop-(\d+)",ch.name)
+                if not isinstance(ch, discord.TextChannel):
+                    continue
+                m = re.match(r"^prop-(\d+)", ch.name)
                 if not m or m.group(1) not in cache:
-                    try: await ch.delete(); await self._log(f"Deleted orphan {ch.name}")
-                    except: pass
+                    try:
+                        await ch.delete()
+                        await self._log(f"Deleted orphan channel {ch.name}")
+                    except:
+                        pass
 
-        # 8) Global rebalance
-        active=[]
+        # 8) GLOBAL REBALANCE ACROSS CATEGORIES
+        active = []
         for cat in cats:
             for ch in cat.channels:
-                if not isinstance(ch,discord.TextChannel): continue
-                m=re.match(r"^prop-(\d+)",ch.name)
-                if not m: continue
-                pid=m.group(1)
-                prop=cache.get(pid)
-                if not prop: continue
-                active.append((prop["price"],pid,ch))
-        active.sort(key=lambda x:x[0])
-        needed=math.ceil(len(active)/MAX_PER_CATEGORY)
-        nums=[int(c.name.split()[-1]) for c in cats if c.name.split()[-1].isdigit()]
-        next_num=max(nums)+1 if nums else 1
-        for _ in range(needed-len(cats)):
-            new_cat=await guild.create_category(f"{CATEGORY_PREFIX} {next_num}")
-            next_num+=1; cats.append(new_cat)
+                if not isinstance(ch, discord.TextChannel):
+                    continue
+                m = re.match(r"^prop-(\d+)", ch.name)
+                if not m:
+                    continue
+                pid = m.group(1)
+                prop = cache.get(pid)
+                if not prop:
+                    continue
+                active.append((prop["price"], pid, ch))
+        active.sort(key=lambda x: x[0])
+        needed = math.ceil(len(active) / MAX_PER_CATEGORY)
+        nums   = [int(c.name.split()[-1]) for c in cats if c.name.split()[-1].isdigit()]
+        next_idx = max(nums) + 1 if nums else 1
+        for _ in range(needed - len(cats)):
+            new_cat = await guild.create_category(f"{CATEGORY_PREFIX} {next_idx}")
+            next_idx += 1
+            cats.append(new_cat)
             await self._log(f"Created category {new_cat.name}")
-        for idx,(_,pid,ch) in enumerate(active):
-            target_cat=cats[idx//MAX_PER_CATEGORY]
-            if ch.category_id!=target_cat.id:
-                try: await ch.edit(category=target_cat); await self._log(f"Moved prop-{pid} to {target_cat.name}")
-                except: pass
+        for idx, (_, pid, ch) in enumerate(active):
+            target = cats[idx // MAX_PER_CATEGORY]
+            if ch.category_id != target.id:
+                try:
+                    await ch.edit(category=target)
+                    await self._log(f"Moved prop-{pid} to {target.name}")
+                except:
+                    pass
 
-        # 9) Reorder within each category
+        # 9) REORDER WITHIN EACH CATEGORY
         for cat in cats:
-            items=[]
+            items = []
             for ch in cat.channels:
-                if not isinstance(ch,discord.TextChannel): continue
-                m=re.match(r"prop-(\d+)",ch.name)
-                if not m: continue
-                pid=m.group(1); prop=cache.get(pid)
-                if not prop: continue
-                items.append((prop["price"],ch.id))
-            items.sort(key=lambda x:x[0])
-            positions=[{"id":cid,"position":idx,"parent_id":cat.id} for idx,(_,cid) in enumerate(items)]
+                if not isinstance(ch, discord.TextChannel):
+                    continue
+                m = re.match(r"prop-(\d+)", ch.name)
+                if not m:
+                    continue
+                pid = m.group(1)
+                prop = cache.get(pid)
+                if not prop:
+                    continue
+                items.append((prop["price"], ch.id))
+            items.sort(key=lambda x: x[0])
+            positions = [
+                {"id": cid, "position": idx, "parent_id": cat.id}
+                for idx, (_, cid) in enumerate(items)
+            ]
             if positions:
-                try: await guild.edit_channel_positions(positions=positions)
-                except: pass
+                try:
+                    await guild.edit_channel_positions(positions=positions)
+                except:
+                    pass
 
-        # 10) Persist
+        # 10) PERSIST CACHE & LOG
         await self.config.properties.set(cache)
         await self._log("Scrape complete and cache persisted")
 
-    async def _build_embed(self, r:dict, event:str):
-        emojis={"new":("🆕","New",None),"price_update":("🔄","Price Updated",None),"stc":("💖","[STC]",discord.Color.magenta())}
-        emoji,label,color=emojis[event]
-        price=r["price"]
-        # pick tier
-        tier=None
-        for thresh,t_emoji,t_color in TIER_THRESHOLDS:
-            if price<=thresh:
-                tier=t_emoji
-                if color is None: color=t_color
+    async def _build_embed(self, r: dict, event: str):
+        emojis = {
+            "new":          ("🆕", "New",           None),
+            "price_update": ("🔄", "Price Updated", None),
+            "stc":          ("💖", "[STC]",         discord.Color.magenta()),
+        }
+        emoji, label, color = emojis[event]
+        price = r["price"]
+        tier_emoji = None
+        for threshold, t_emoji, t_color in TIER_THRESHOLDS:
+            if price <= threshold:
+                tier_emoji = t_emoji
+                if color is None:
+                    color = t_color
                 break
-        if tier is None:
-            tier,_=TIER_FALLBACK
-            if color is None: color=TIER_FALLBACK[1]
-        title=f"{emoji} {label} — {r['address']}"
-        desc=f"Listed: <t:{r['listed_ts']}:F> (<t:{r['listed_ts']}:R>)\nUpdated: <t:{r['updated_ts']}:F> (<t:{r['updated_ts']}:R>)"
-        embed=discord.Embed(title=title,description=desc,color=color)
-        if r.get("image_url"): embed.set_image(url=r["image_url"])
-        embed.add_field(name="💷 Price",value=f"£{int(price):,}",inline=True)
-        beds=r.get("number_bedrooms"); beds_str=str(int(beds)) if isinstance(beds,(int,float)) and not math.isnan(beds) else "N/A"
-        embed.add_field(name="🛏 Bedrooms",value=beds_str,inline=True)
-        embed.add_field(name="🏠 Type",value=r["type"],inline=True)
+        if tier_emoji is None:
+            tier_emoji, fallback_color = TIER_FALLBACK
+            if color is None:
+                color = fallback_color
+
+        title = f"{emoji} {label} — {r['address']}"
+        desc  = (
+            f"Listed: <t:{r['listed_ts']}:F> (<t:{r['listed_ts']}:R>)\n"
+            f"Updated: <t:{r['updated_ts']}:F> (<t:{r['updated_ts']}:R>)"
+        )
+        embed = discord.Embed(title=title, description=desc, color=color)
+        if r.get("image_url"):
+            embed.set_image(url=r["image_url"])
+        embed.add_field(name="💷 Price", value=f"£{int(price):,}", inline=True)
+        beds = r.get("number_bedrooms")
+        beds_str = (
+            str(int(beds)) if isinstance(beds, (int, float)) and not math.isnan(beds)
+            else "N/A"
+        )
+        embed.add_field(name="🛏 Bedrooms", value=beds_str, inline=True)
+        embed.add_field(name="🏠 Type", value=r["type"], inline=True)
         if r.get("agent") and r.get("agent_url"):
-            embed.add_field(name="🔗 Agent",value=f"[{r['agent']}]({r['agent_url']})",inline=True)
+            embed.add_field(
+                name="🔗 Agent",
+                value=f"[{r['agent']}]({r['agent_url']})",
+                inline=True,
+            )
         if r.get("url"):
-            embed.add_field(name="🔗 Listing",value=f"[View on Rightmove]({r['url']})",inline=False)
-            full_desc=await self._fetch_property_description(r["url"])
+            embed.add_field(
+                name="🔗 Listing",
+                value=f"[View on Rightmove]({r['url']})",
+                inline=False,
+            )
+            full_desc = await self._fetch_property_description(r["url"])
             if full_desc:
-                if len(full_desc)>1021: full_desc=full_desc[:1021]+"..."
-                embed.add_field(name="📝 Description",value=full_desc,inline=False)
-        return embed,tier
+                if len(full_desc) > 1021:
+                    full_desc = full_desc[:1021] + "..."
+                embed.add_field(name="📝 Description", value=full_desc, inline=False)
+
+        return embed, tier_emoji
 
     async def _cleanup_orphans(self) -> int:
-        cache=await self.config.properties()
-        guild=self.target_channel.guild
-        deleted=0
-        cats=[c for c in guild.categories if c.name.startswith(CATEGORY_PREFIX)]
+        cache = await self.config.properties()
+        guild = self.target_channel.guild
+        deleted = 0
+        cats = [c for c in guild.categories if c.name.startswith(CATEGORY_PREFIX)]
         for cat in cats:
             for ch in list(cat.channels):
-                if not isinstance(ch,discord.TextChannel): continue
-                m=re.match(r"^prop-(\d+)",ch.name)
+                if not isinstance(ch, discord.TextChannel):
+                    continue
+                m = re.match(r"^prop-(\d+)", ch.name)
                 if not m or m.group(1) not in cache:
-                    try: await ch.delete(); deleted+=1; await self._log(f"Deleted orphan {ch.name}")
-                    except: pass
+                    try:
+                        await ch.delete()
+                        deleted += 1
+                        await self._log(f"Deleted orphan channel {ch.name}")
+                    except:
+                        pass
         return deleted
