@@ -515,6 +515,8 @@ class RightmoveCog(commands.Cog):
                         pass
 
         # 8) GLOBAL REBALANCE ACROSS CATEGORIES
+        #    Collect every active prop-<pid> channel, sort by price,
+        #    then slice into buckets of MAX_PER_CATEGORY and physically move.
         active = []
         for cat in cats:
             for ch in cat.channels:
@@ -528,7 +530,11 @@ class RightmoveCog(commands.Cog):
                 if not prop:
                     continue
                 active.append((prop["price"], pid, ch))
+
+        # Sort globally by price (ascending)
         active.sort(key=lambda x: x[0])
+
+        # Ensure we have enough RIGHTMOVE N categories
         needed = math.ceil(len(active) / MAX_PER_CATEGORY)
         nums   = [int(c.name.split()[-1]) for c in cats if c.name.split()[-1].isdigit()]
         next_idx = max(nums) + 1 if nums else 1
@@ -537,12 +543,14 @@ class RightmoveCog(commands.Cog):
             next_idx += 1
             cats.append(new_cat)
             await self._log(f"Created category {new_cat.name}")
+
+        # Move each channel into the correct bucket
         for idx, (_, pid, ch) in enumerate(active):
-            target = cats[idx // MAX_PER_CATEGORY]
-            if ch.category_id != target.id:
+            target_cat = cats[idx // MAX_PER_CATEGORY]
+            if ch.category_id != target_cat.id:
                 try:
-                    await ch.edit(category=target)
-                    await self._log(f"Moved prop-{pid} to {target.name}")
+                    await ch.edit(category=target_cat)
+                    await self._log(f"Moved prop-{pid} to {target_cat.name}")
                 except:
                     pass
 
