@@ -368,7 +368,7 @@ class RightmoveCog(commands.Cog):
         url = (
             "https://www.rightmove.co.uk/property-for-sale/find.html?"
             "sortType=1&viewType=LIST&channel=BUY"
-            "&maxPrice=250000&radius=0.0"
+            "&maxPrice=265000&radius=0.0"
             "&locationIdentifier=USERDEFINEDAREA%5E%7B"
             "%22polylines%22%3A%22sh%7CtHhu%7BE%7D%7CDr_Nf%7B"
             "AnjZxvLz%7Df%40reAllgA%7Bab%40fg%60%40kyu%40s_"
