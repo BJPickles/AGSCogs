@@ -580,8 +580,8 @@ class RightmoveCog(commands.Cog):
 
         # (e) one single API call to move & reorder *everything*
         try:
-            # in discord.py v1.x this method lives on the bot/client, not on Guild
-            await self.bot.edit_channel_positions(guild, positions)
+            # Use the raw HTTP client to bulk‐edit channel positions
+            await self.bot.http.bulk_edit_channel_positions(guild.id, positions)
             for pid, catname in moved:
                 await self._log(f"Moved prop-{pid} to {catname}")
         except Exception as e:
