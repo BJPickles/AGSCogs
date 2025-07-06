@@ -531,9 +531,11 @@ class RightmoveCog(commands.Cog):
                     except:
                         pass
 
-        # 8+9) GLOBAL REBALANCE & REORDER (one-by-one, only change category if needed)
+        # 8+9) GLOBAL REBALANCE & REORDER (atomic bulk)
+        #    Collect every prop-<pid> channel, sort by price, slice into 50-item buckets,
+        #    then send ONE PATCH to discord.com/api/v10/guilds/{guild.id}/channels.
 
-        # (a) collect all prop-<pid> channels
+        # a) Collect
         active = []
         for cat in cats:
             for ch in cat.channels:
@@ -548,12 +550,12 @@ class RightmoveCog(commands.Cog):
                     continue
                 active.append((prop["price"], pid, ch))
 
-        # (b) sort by price ascending
-        active.sort(key=lambda x: x[0])
+        # b) Sort by price ascending
+        active.sort(key=lambda tpl: tpl[0])
 
-        # (c) make sure we have enough RIGHTMOVE N categories
+        # c) Ensure enough RIGHTMOVE N categories
         needed = math.ceil(len(active) / MAX_PER_CATEGORY)
-        nums = [int(c.name.split()[-1]) for c in cats if c.name.split()[-1].isdigit()]
+        nums   = [int(c.name.split()[-1]) for c in cats if c.name.split()[-1].isdigit()]
         next_idx = max(nums) + 1 if nums else 1
         for _ in range(needed - len(cats)):
             new_cat = await guild.create_category(f"{CATEGORY_PREFIX} {next_idx}")
@@ -561,30 +563,45 @@ class RightmoveCog(commands.Cog):
             await self._log(f"Created category {new_cat.name}")
             next_idx += 1
 
-        # (d) move/reposition every channel
+        # d) Build positions list
+        positions = []
+        moved     = []
         for idx, (_, pid, ch) in enumerate(active):
-            bucket_idx = idx // MAX_PER_CATEGORY
+            bucket = cats[idx // MAX_PER_CATEGORY]
             pos_in_bucket = idx % MAX_PER_CATEGORY
-            target_cat = cats[bucket_idx]
+            positions.append({
+                "id":        ch.id,
+                "parent_id": bucket.id,
+                "position":  pos_in_bucket,
+            })
+            if ch.category_id != bucket.id:
+                moved.append((pid, bucket.name))
 
-            # build kwargs for edit()
-            kwargs = {"position": pos_in_bucket}
-            moved_cat = False
-            if ch.category_id != target_cat.id:
-                kwargs["category"] = target_cat
-                moved_cat = True
+        # e) ONE atomic HTTP PATCH to reorder EVERYTHING
+        url = f"https://discord.com/api/v10/guilds/{guild.id}/channels"
+        headers = {
+            "Authorization": f"Bot {self.bot.http.token}",
+            "Content-Type":  "application/json",
+        }
+        try:
+            resp = await asyncio.to_thread(
+                requests.patch,
+                url,
+                json=positions,
+                headers=headers,
+            )
+        except Exception as e:
+            return await self._log(f"Error sending bulk reorder request: {e}")
 
-            try:
-                # if we need to switch category we pass both, otherwise only position
-                await ch.edit(**kwargs)
-                if moved_cat:
-                    await self._log(f"Moved prop-{pid} to {target_cat.name} at position {pos_in_bucket}")
-                else:
-                    await self._log(f"Repositioned prop-{pid} to position {pos_in_bucket} in {target_cat.name}")
-            except Exception as e:
-                await self._log(f"Error moving prop-{pid}: {e}")
-            # optional tiny delay if you hit rate limits
-            await asyncio.sleep(0.05)
+        if resp.status_code == 200:
+            for pid, catname in moved:
+                await self._log(f"Moved prop-{pid} to {catname}")
+        else:
+            await self._log(f"Bulk reorder FAILED {resp.status_code}: {resp.text}")
+
+        # 10) PERSIST CACHE & LOG
+        await self.config.properties.set(cache)
+        await self._log("Scrape complete and cache persisted")
 
     async def _build_embed(self, r: dict, event: str):
         emojis = {
