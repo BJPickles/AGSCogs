@@ -531,9 +531,9 @@ class RightmoveCog(commands.Cog):
                     except:
                         pass
 
-        # 8+9) GLOBAL REBALANCE & REORDER (one atomic pass)
-        #  ➤ Build a single list of every prop-<pid> channel,
-        #    sorted strictly by price ascending, then slice into 50-item buckets.
+        # 8+9) GLOBAL REBALANCE & REORDER (one-by-one)
+        #    Gather every prop-<pid> channel, sort by price,
+        #    then individually move each into the right category & position.
 
         # (a) Collect
         active = []
@@ -550,42 +550,36 @@ class RightmoveCog(commands.Cog):
                     continue
                 active.append((prop["price"], pid, ch))
 
-        # (b) sort by price
-        active.sort(key=lambda tpl: tpl[0])
+        # (b) Sort globally by price ascending
+        active.sort(key=lambda tup: tup[0])
 
-        # (c) ensure we have enough RIGHTMOVE N categories
+        # (c) Ensure we have enough RIGHTMOVE N categories
         needed = math.ceil(len(active) / MAX_PER_CATEGORY)
-        nums   = [int(c.name.split()[-1]) for c in cats if c.name.split()[-1].isdigit()]
+        nums = [
+            int(c.name.split()[-1])
+            for c in cats if c.name.split()[-1].isdigit()
+        ]
         next_idx = max(nums) + 1 if nums else 1
         for _ in range(needed - len(cats)):
             new_cat = await guild.create_category(f"{CATEGORY_PREFIX} {next_idx}")
             cats.append(new_cat)
-            next_idx += 1
             await self._log(f"Created category {new_cat.name}")
+            next_idx += 1
 
-        # (d) build the positions list
-        positions = []
-        moved     = []   # just so we can log who actually crossed buckets
+        # (d) Loop through every channel, one at a time
         for idx, (_, pid, ch) in enumerate(active):
             bucket_idx = idx // MAX_PER_CATEGORY
-            place_in_bucket = idx % MAX_PER_CATEGORY
+            pos_in_bucket = idx % MAX_PER_CATEGORY
             target_cat = cats[bucket_idx]
-            if ch.category_id != target_cat.id:
-                moved.append((pid, target_cat.name))
-            positions.append({
-                "id":        ch.id,
-                "parent_id": target_cat.id,
-                "position":  place_in_bucket,
-            })
 
-        # (e) one single API call to move & reorder *everything*
-        try:
-            # Use the raw HTTP client to bulk‐edit channel positions
-            await self.bot.http.bulk_edit_channel_positions(guild.id, positions)
-            for pid, catname in moved:
-                await self._log(f"Moved prop-{pid} to {catname}")
-        except Exception as e:
-            await self._log(f"Error reordering channels: {e}")
+            try:
+                # Move channel into the correct category AND set its position
+                await ch.edit(category=target_cat, position=pos_in_bucket)
+                await self._log(f"Moved prop-{pid} to {target_cat.name} at position {pos_in_bucket}")
+                # Optional small delay to avoid hammering the API:
+                # await asyncio.sleep(0.05)
+            except Exception as e:
+                await self._log(f"Error moving prop-{pid}: {e}")
 
     async def _build_embed(self, r: dict, event: str):
         emojis = {
