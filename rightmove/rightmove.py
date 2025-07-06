@@ -288,14 +288,24 @@ class RightmoveCog(commands.Cog):
 
     @rm.command(name="start")
     async def rm_start(self, ctx, channel: discord.TextChannel = None):
+        """Start the daily 07:00 scrape (full rebuild)."""
         if self.scrape_loop and self.scrape_loop.is_running():
             return await ctx.send("❌ Already scheduled.")
         self.target_channel = channel or ctx.channel
         self._halt          = False
-        self.scrape_loop    = tasks.loop(time=SCRAPE_TIME)(self.do_scrape)
+
+        # 1a) Prepare a daily task that always forces a full rebuild
+        async def _scheduled_full_scrape():
+            await self.do_scrape(force_refresh=True)
+
+        # 1b) Schedule it at SCRAPE_TIME (07:00)
+        self.scrape_loop = tasks.loop(time=SCRAPE_TIME)(_scheduled_full_scrape)
         self.scrape_loop.start()
         await ctx.send(f"✅ Scheduled daily scrape in {self.target_channel.mention}")
         await self._log(f"Scheduled scrape in {self.target_channel.mention}")
+
+        # 1c) Run one now immediately (so you get your first reorder straight away)
+        asyncio.create_task(self.do_scrape(force_refresh=True))
 
     @rm.command(name="stop")
     async def rm_stop(self, ctx):
@@ -343,7 +353,8 @@ class RightmoveCog(commands.Cog):
         await ctx.send("🔄 Running manual scrape…")
         await self._log(f"Manual scrape by {ctx.author}")
         async with self._lock:
-            await self.do_scrape(force_refresh=override)
+            # always do a full rebuild & reorder, just like override
+            await self.do_scrape(force_refresh=True)
         await ctx.send("✅ Manual scrape done.")
         await self._log("Manual scrape completed")
 
@@ -448,45 +459,37 @@ class RightmoveCog(commands.Cog):
             }
             await self._log(f"Created prop-{pid}")
 
-        # 5) UPDATE EXISTING CHANNELS (with tier-change)
+        # 5) UPDATE EXISTING CHANNELS (always re-touched now)
         for pid in to_update:
             r   = new_props[pid]
             old = cache[pid]
-
-            old_price = old["price"]
-            new_price = r["price"]
-            old_tier  = _get_tier_emoji(old_price)
-            new_tier  = _get_tier_emoji(new_price)
-
-            # FORCE a rename/embed when override is True, or when price/tier changes
-            price_changed = force_refresh or (new_price != old_price) or (new_tier != old_tier)
-            stc_changed   = r["is_stc"] and not old["is_stc"]
-            if not price_changed and not stc_changed:
-                continue
 
             ch = guild.get_channel(old["channel_id"])
             if not ch:
                 continue
 
-            event = "stc" if stc_changed else "price_update"
-            embed, _ = await self._build_embed(r, event=event)
+            # Decide label for embed formatting (if it just went STC or just a generic update)
+            event = "stc" if (r["is_stc"] and not old["is_stc"]) else "price_update"
+            embed, tier_emoji = await self._build_embed(r, event=event)
 
-            # rename the channel with the new tier emoji
-            await ch.edit(name=f"prop-{pid} {new_tier}")
+            # 5a) Rename the channel with the new tier‐emoji
+            await ch.edit(name=f"prop-{pid} {tier_emoji}")
 
-            # edit or resend the embed
+            # 5b) Edit the existing message or send a new one
             try:
                 msg = await ch.fetch_message(old["message_id"])
                 await msg.edit(embed=embed)
             except discord.NotFound:
                 msg = await ch.send(embed=embed)
 
-            # update our cache
+            # 5c) Update our cache so the global sort (steps 8+9) sees the fresh price
             old.update({
-                "price":       new_price,
+                "price":       r["price"],
                 "updated_ts":  r["updated_ts"],
                 "is_stc":      r["is_stc"],
+                "message_id":  msg.id,
             })
+
             await self._log(f"Updated prop-{pid} ({event})")
 
         # 6) DELETE VANISHED CHANNELS
