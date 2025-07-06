@@ -580,15 +580,12 @@ class RightmoveCog(commands.Cog):
 
         # (e) one single API call to move & reorder *everything*
         try:
-            await guild.edit_channel_positions(positions=positions)
+            # in discord.py v1.x this method lives on the bot/client, not on Guild
+            await self.bot.edit_channel_positions(guild, positions)
             for pid, catname in moved:
                 await self._log(f"Moved prop-{pid} to {catname}")
         except Exception as e:
             await self._log(f"Error reordering channels: {e}")
-
-        # 10) PERSIST CACHE & LOG
-        await self.config.properties.set(cache)
-        await self._log("Scrape complete and cache persisted")
 
     async def _build_embed(self, r: dict, event: str):
         emojis = {
