@@ -254,15 +254,29 @@ class RightmoveCog(commands.Cog):
             self.scrape_loop.cancel()
 
     async def _log(self, message: str):
+        """
+        Send a log message to your configured log channel,
+        prefixed with Discord-formatted full & relative timestamps.
+        """
+        # load your saved settings
         settings = await self.config.settings()
         ch_id    = settings.get("log_channel_id")
-        if ch_id:
-            ch = self.bot.get_channel(ch_id)
-            if isinstance(ch, discord.TextChannel):
-                try:
-                    await ch.send(f"[RightmoveCog] {message}")
-                except:
-                    pass
+        if not ch_id:
+            return
+        ch = self.bot.get_channel(ch_id)
+        if not isinstance(ch, discord.TextChannel):
+            return
+
+        # get current UTC timestamp
+        now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+        # build the Discord <t:…> tags
+        prefix = f"<t:{now_ts}:F> (<t:{now_ts}:R>)"
+
+        # send the log line
+        try:
+            await ch.send(f"{prefix} [RightmoveCog] {message}")
+        except:
+            pass
 
     @commands.is_owner()
     @commands.group(name="rm", invoke_without_command=True)
@@ -517,9 +531,11 @@ class RightmoveCog(commands.Cog):
                     except:
                         pass
 
-        # 8) GLOBAL REBALANCE ACROSS CATEGORIES
-        #    Collect every active prop-<pid> channel, sort by price,
-        #    then slice into buckets of MAX_PER_CATEGORY and physically move.
+        # 8+9) GLOBAL REBALANCE & REORDER (one atomic pass)
+        #  ➤ Build a single list of every prop-<pid> channel,
+        #    sorted strictly by price ascending, then slice into 50-item buckets.
+
+        # (a) Collect
         active = []
         for cat in cats:
             for ch in cat.channels:
@@ -534,53 +550,41 @@ class RightmoveCog(commands.Cog):
                     continue
                 active.append((prop["price"], pid, ch))
 
-        # Sort globally by price (ascending)
-        active.sort(key=lambda x: x[0])
+        # (b) sort by price
+        active.sort(key=lambda tpl: tpl[0])
 
-        # Ensure we have enough RIGHTMOVE N categories
+        # (c) ensure we have enough RIGHTMOVE N categories
         needed = math.ceil(len(active) / MAX_PER_CATEGORY)
         nums   = [int(c.name.split()[-1]) for c in cats if c.name.split()[-1].isdigit()]
         next_idx = max(nums) + 1 if nums else 1
         for _ in range(needed - len(cats)):
             new_cat = await guild.create_category(f"{CATEGORY_PREFIX} {next_idx}")
-            next_idx += 1
             cats.append(new_cat)
+            next_idx += 1
             await self._log(f"Created category {new_cat.name}")
 
-        # Move each channel into the correct bucket
+        # (d) build the positions list
+        positions = []
+        moved     = []   # just so we can log who actually crossed buckets
         for idx, (_, pid, ch) in enumerate(active):
-            target_cat = cats[idx // MAX_PER_CATEGORY]
+            bucket_idx = idx // MAX_PER_CATEGORY
+            place_in_bucket = idx % MAX_PER_CATEGORY
+            target_cat = cats[bucket_idx]
             if ch.category_id != target_cat.id:
-                try:
-                    await ch.edit(category=target_cat)
-                    await self._log(f"Moved prop-{pid} to {target_cat.name}")
-                except:
-                    pass
+                moved.append((pid, target_cat.name))
+            positions.append({
+                "id":        ch.id,
+                "parent_id": target_cat.id,
+                "position":  place_in_bucket,
+            })
 
-        # 9) REORDER WITHIN EACH CATEGORY
-        for cat in cats:
-            items = []
-            for ch in cat.channels:
-                if not isinstance(ch, discord.TextChannel):
-                    continue
-                m = re.match(r"prop-(\d+)", ch.name)
-                if not m:
-                    continue
-                pid = m.group(1)
-                prop = cache.get(pid)
-                if not prop:
-                    continue
-                items.append((prop["price"], ch.id))
-            items.sort(key=lambda x: x[0])
-            positions = [
-                {"id": cid, "position": idx, "parent_id": cat.id}
-                for idx, (_, cid) in enumerate(items)
-            ]
-            if positions:
-                try:
-                    await guild.edit_channel_positions(positions=positions)
-                except:
-                    pass
+        # (e) one single API call to move & reorder *everything*
+        try:
+            await guild.edit_channel_positions(positions=positions)
+            for pid, catname in moved:
+                await self._log(f"Moved prop-{pid} to {catname}")
+        except Exception as e:
+            await self._log(f"Error reordering channels: {e}")
 
         # 10) PERSIST CACHE & LOG
         await self.config.properties.set(cache)
