@@ -531,11 +531,9 @@ class RightmoveCog(commands.Cog):
                     except:
                         pass
 
-        # 8+9) GLOBAL REBALANCE & REORDER (atomic bulk)
-        #    Collect every prop-<pid> channel, sort by price, slice into 50-item buckets,
-        #    then send ONE PATCH to discord.com/api/v10/guilds/{guild.id}/channels.
+        # 8+9) REORDER BY CLEAR + REFILL (guaranteed no 50-limit errors)
 
-        # a) Collect
+        # a) Collect and sort every prop-<pid> channel by price asc
         active = []
         for cat in cats:
             for ch in cat.channels:
@@ -549,11 +547,9 @@ class RightmoveCog(commands.Cog):
                 if not prop:
                     continue
                 active.append((prop["price"], pid, ch))
+        active.sort(key=lambda tup: tup[0])
 
-        # b) Sort by price ascending
-        active.sort(key=lambda tpl: tpl[0])
-
-        # c) Ensure enough RIGHTMOVE N categories
+        # b) Ensure we have enough RIGHTMOVE N categories
         needed = math.ceil(len(active) / MAX_PER_CATEGORY)
         nums   = [int(c.name.split()[-1]) for c in cats if c.name.split()[-1].isdigit()]
         next_idx = max(nums) + 1 if nums else 1
@@ -563,43 +559,31 @@ class RightmoveCog(commands.Cog):
             await self._log(f"Created category {new_cat.name}")
             next_idx += 1
 
-        # d) Build positions list
-        positions = []
-        moved     = []
+        # c) Step 1: Remove every prop-<pid> from its category
+        for _, pid, ch in active:
+            try:
+                # category=None = move it to no category (top-level)
+                await ch.edit(category=None)
+            except Exception as e:
+                await self._log(f"Error uncategorizing prop-{pid}: {e}")
+            # small delay if you hit rate limits (uncomment if needed)
+            # await asyncio.sleep(0.05)
+
+        # d) Step 2: Re-add each channel INTO the right bucket at the right position
         for idx, (_, pid, ch) in enumerate(active):
-            bucket = cats[idx // MAX_PER_CATEGORY]
-            pos_in_bucket = idx % MAX_PER_CATEGORY
-            positions.append({
-                "id":        ch.id,
-                "parent_id": bucket.id,
-                "position":  pos_in_bucket,
-            })
-            if ch.category_id != bucket.id:
-                moved.append((pid, bucket.name))
+            bucket_idx     = idx // MAX_PER_CATEGORY
+            pos_in_bucket  = idx % MAX_PER_CATEGORY
+            target_cat     = cats[bucket_idx]
+            try:
+                # move into target_cat *and* set its exact position
+                await ch.edit(category=target_cat, position=pos_in_bucket)
+                await self._log(f"Moved prop-{pid} to {target_cat.name} at slot {pos_in_bucket}")
+            except Exception as e:
+                await self._log(f"Error moving prop-{pid}: {e}")
+            # small delay if you hit rate limits (uncomment if needed)
+            # await asyncio.sleep(0.05)
 
-        # e) ONE atomic HTTP PATCH to reorder EVERYTHING
-        url = f"https://discord.com/api/v10/guilds/{guild.id}/channels"
-        headers = {
-            "Authorization": f"Bot {self.bot.http.token}",
-            "Content-Type":  "application/json",
-        }
-        try:
-            resp = await asyncio.to_thread(
-                requests.patch,
-                url,
-                json=positions,
-                headers=headers,
-            )
-        except Exception as e:
-            return await self._log(f"Error sending bulk reorder request: {e}")
-
-        if resp.status_code == 200:
-            for pid, catname in moved:
-                await self._log(f"Moved prop-{pid} to {catname}")
-        else:
-            await self._log(f"Bulk reorder FAILED {resp.status_code}: {resp.text}")
-
-        # 10) PERSIST CACHE & LOG
+        # 10) PERSIST CACHE & LOG (unchanged)
         await self.config.properties.set(cache)
         await self._log("Scrape complete and cache persisted")
 
