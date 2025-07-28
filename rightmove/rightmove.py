@@ -533,7 +533,7 @@ class RightmoveCog(commands.Cog):
 
         # 8+9) REORDER BY CLEAR + REFILL
 
-        # a) Build a complete, price‐sorted list of every prop-<pid> channel
+        # 8a) Build a complete, price-sorted list from the cache
         active = []
         for pid, info in cache.items():
             ch = guild.get_channel(info["channel_id"])
@@ -552,15 +552,14 @@ class RightmoveCog(commands.Cog):
             await self._log(f"Created category {new_cat.name}")
             next_idx += 1
 
-        # c) Step 1: Remove every prop-<pid> from its category
-        for _, pid, ch in active:
+        # 8c) UNCATEGORIZE every single prop- channel first
+        for ch in guild.text_channels:
+            if not ch.name.startswith("prop-"):
+                continue
             try:
-                # category=None = move it to no category (top-level)
                 await ch.edit(category=None)
             except Exception as e:
-                await self._log(f"Error uncategorizing prop-{pid}: {e}")
-            # small delay if you hit rate limits (uncomment if needed)
-            # await asyncio.sleep(0.05)
+                await self._log(f"Error uncategorizing {ch.name}: {e}")
 
         # d) Step 2: Re-add each channel INTO the right bucket at the right position
         for idx, (_, pid, ch) in enumerate(active):
