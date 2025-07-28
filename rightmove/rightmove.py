@@ -531,23 +531,16 @@ class RightmoveCog(commands.Cog):
                     except:
                         pass
 
-        # 8+9) REORDER BY CLEAR + REFILL (guaranteed no 50-limit errors)
+        # 8+9) REORDER BY CLEAR + REFILL
 
-        # a) Collect and sort every prop-<pid> channel by price asc
+        # a) Build a complete, price‐sorted list of every prop-<pid> channel
         active = []
-        for cat in cats:
-            for ch in cat.channels:
-                if not isinstance(ch, discord.TextChannel):
-                    continue
-                m = re.match(r"^prop-(\d+)", ch.name)
-                if not m:
-                    continue
-                pid = m.group(1)
-                prop = cache.get(pid)
-                if not prop:
-                    continue
-                active.append((prop["price"], pid, ch))
-        active.sort(key=lambda tup: tup[0])
+        for pid, info in cache.items():
+            ch = guild.get_channel(info["channel_id"])
+            if not isinstance(ch, discord.TextChannel):
+                continue
+            active.append((info["price"], pid, ch))
+        active.sort(key=lambda t: t[0])
 
         # b) Ensure we have enough RIGHTMOVE N categories
         needed = math.ceil(len(active) / MAX_PER_CATEGORY)
