@@ -42,6 +42,29 @@ def compute_next_occurrence(
         candidate += timedelta(days=7)
     return candidate
 
+def compute_last_occurrence(
+    user_day: int,
+    hour: int,
+    minute: int,
+    now: Optional[datetime] = None
+) -> datetime:
+    """
+    Return the most recent occurrence at or before 'now' of the given weekday+time.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    target_wd = userday_to_pyweekday(user_day)
+    today_wd = now.weekday()
+    days_ago = (today_wd - target_wd) % 7
+    candidate = datetime(
+        now.year, now.month, now.day,
+        hour, minute, 0,
+        tzinfo=timezone.utc
+    ) - timedelta(days=days_ago)
+    if candidate > now:
+        candidate -= timedelta(days=7)
+    return candidate
+
 async def mod_check(ctx: commands.Context) -> bool:
     return ctx.author.guild_permissions.manage_guild
 
@@ -112,15 +135,15 @@ class FridayGameNight(commands.Cog):
         em = int(data.get("event_minute", 30))
 
         now = datetime.now(timezone.utc)
-        # next announcement datetime
-        announce_dt = compute_next_occurrence(ad, ah, am, now)
-        window_start = announce_dt
-        window_end = announce_dt + timedelta(minutes=5)
-        if not (window_start <= now <= window_end):
+
+        # last announcement datetime (at or before now)
+        last_announce = compute_last_occurrence(ad, ah, am, now)
+        # allow a 5-minute window after that time
+        if not (last_announce <= now <= last_announce + timedelta(minutes=5)):
             return
 
-        # compute the matching event datetime *relative to the announcement*
-        event_dt = compute_next_occurrence(ed, eh, em, now=announce_dt)
+        # compute the matching event datetime relative to that announce time
+        event_dt = compute_next_occurrence(ed, eh, em, now=last_announce)
         next_event_unix = int(event_dt.timestamp())
 
         last_posted = int(data.get("last_posted_unix", 0))
@@ -128,13 +151,17 @@ class FridayGameNight(commands.Cog):
             return
 
         async with self._lock:
-            # double-check under lock
             data2 = await self.config.guild(guild).all()
             if int(data2.get("last_posted_unix", 0)) >= next_event_unix:
                 return
 
             template = data2.get("message", DEFAULT_MESSAGE)
-            final = re.sub(r"\{\s*unix\s*\}", str(next_event_unix), template, flags=re.IGNORECASE)
+            final = re.sub(
+                r"\{\s*unix\s*\}",
+                str(next_event_unix),
+                template,
+                flags=re.IGNORECASE
+            )
             allowed = discord.AllowedMentions(roles=True, users=True, everyone=False)
             try:
                 sent = await channel.send(final, allowed_mentions=allowed)
@@ -199,12 +226,18 @@ class FridayGameNight(commands.Cog):
 
         embed.add_field(
             name="Next Announcement",
-            value=f"{next_ann:%a %Y-%m-%d %H:%M UTC}\n<t:{int(next_ann.timestamp())}:t> (<t:{int(next_ann.timestamp())}:R>)",
+            value=(
+                f"{next_ann:%a %Y-%m-%d %H:%M UTC}\n"
+                f"<t:{int(next_ann.timestamp())}:t> (<t:{int(next_ann.timestamp())}:R>)"
+            ),
             inline=False,
         )
         embed.add_field(
             name="Next Event",
-            value=f"{next_evt:%a %Y-%m-%d %H:%M UTC}\n<t:{int(next_evt.timestamp())}:t> (<t:{int(next_evt.timestamp())}:R>)",
+            value=(
+                f"{next_evt:%a %Y-%m-%d %H:%M UTC}\n"
+                f"<t:{int(next_evt.timestamp())}:t> (<t:{int(next_evt.timestamp())}:R>)"
+            ),
             inline=False,
         )
 
@@ -221,7 +254,10 @@ class FridayGameNight(commands.Cog):
 
         if last_posted:
             lp = datetime.fromtimestamp(last_posted, tz=timezone.utc)
-            embed.set_footer(text=f"Last posted for event at {lp:%Y-%m-%d %H:%M UTC} (unix {last_posted})")
+            embed.set_footer(text=(
+                f"Last posted for event at {lp:%Y-%m-%d %H:%M UTC} "
+                f"(unix {last_posted})"
+            ))
 
         await ctx.send(embed=embed)
 
