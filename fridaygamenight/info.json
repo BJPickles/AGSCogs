@@ -1,0 +1,10 @@
+{
+    "author": ["BJPickles"],
+    "name": "FridayGameNight",
+    "short": "Automated weekly game night announcer",
+    "description": "Posts a scheduled game night message every week with dynamic Discord timestamps.",
+    "install_msg": "Thank you for installing FridayGameNight! Use [p]gamenight help to configure it.",
+    "requirements": [],
+    "tags": ["automation", "scheduler", "games"],
+    "min_bot_version": "3.5.0"
+}
