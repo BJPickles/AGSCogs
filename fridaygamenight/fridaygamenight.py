@@ -16,7 +16,7 @@ DEFAULT_MESSAGE = (
 )
 
 def userday_to_pyweekday(userday: int) -> int:
-    # 1=Monday .. 7=Sunday  →  0..6
+    # 1=Monday .. 7=Sunday → 0..6
     return (userday - 1) % 7
 
 def compute_next_occurrence(
@@ -26,8 +26,7 @@ def compute_next_occurrence(
     now: Optional[datetime] = None
 ) -> datetime:
     """
-    Returns the next occurrence *strictly after* 'now' of the given
-    weekday+time.
+    Return the next occurrence strictly after 'now' of the given weekday+time.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -47,20 +46,23 @@ async def mod_check(ctx: commands.Context) -> bool:
     return ctx.author.guild_permissions.manage_guild
 
 class FridayGameNight(commands.Cog):
-    """Automated weekly game night announcer with advance posting."""
+    """Automated weekly game night announcer with separate announce/event schedules."""
 
     def __init__(self, bot: Red):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xA1B2C3D4E6, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xA1B2C3D4E7, force_registration=True)
         self.config.register_guild(
             enabled=False,
             channel_id=None,
             message=DEFAULT_MESSAGE,
-            day=5,                # Friday
-            announce_hour=9,      # post at 09:00 UTC
+            # default: announce Thursday at 09:00 UTC
+            announce_day=4,
+            announce_hour=9,
             announce_minute=0,
-            hour=19,              # event at 19:30 UTC
-            minute=30,
+            # default: event Friday at 19:30 UTC
+            event_day=5,
+            event_hour=19,
+            event_minute=30,
             last_posted_unix=0,
         )
         self._task: Optional[asyncio.Task] = None
@@ -82,12 +84,12 @@ class FridayGameNight(commands.Cog):
                     try:
                         await self._handle_guild(guild)
                     except Exception:
-                        self.bot.logger.exception("FGN _handle_guild failed for %s", guild.id)
+                        self.bot.logger.exception("FGN _handle_guild error for %s", guild.id)
                 await asyncio.sleep(30)
             except asyncio.CancelledError:
                 break
             except Exception:
-                self.bot.logger.exception("FGN background loop error")
+                self.bot.logger.exception("FGN background loop crashed")
                 await asyncio.sleep(30)
 
     async def _handle_guild(self, guild: discord.Guild) -> None:
@@ -101,47 +103,32 @@ class FridayGameNight(commands.Cog):
         if channel is None:
             return
 
-        # gather config
-        user_day = int(data.get("day", 5))
-        ann_hr = int(data.get("announce_hour", 9))
-        ann_min = int(data.get("announce_minute", 0))
-        evt_hr = int(data.get("hour", 19))
-        evt_min = int(data.get("minute", 30))
+        # load announce & event schedules
+        ad = int(data.get("announce_day", 4))
+        ah = int(data.get("announce_hour", 9))
+        am = int(data.get("announce_minute", 0))
+        ed = int(data.get("event_day", 5))
+        eh = int(data.get("event_hour", 19))
+        em = int(data.get("event_minute", 30))
 
         now = datetime.now(timezone.utc)
-        target_wd = userday_to_pyweekday(user_day)
-        today_wd = now.weekday()
-        days_ahead = (target_wd - today_wd) % 7
-        base_date = (now + timedelta(days=days_ahead)).date()
-
-        # announcement window
-        ann_dt = datetime(
-            base_date.year, base_date.month, base_date.day,
-            ann_hr, ann_min, 0,
-            tzinfo=timezone.utc
-        )
-        window_start = ann_dt
-        window_end = ann_dt + timedelta(minutes=5)
+        # next announcement datetime
+        announce_dt = compute_next_occurrence(ad, ah, am, now)
+        window_start = announce_dt
+        window_end = announce_dt + timedelta(minutes=5)
         if not (window_start <= now <= window_end):
             return
 
-        # compute that same day's event datetime (or next week if it would be before announce)
-        evt_dt = datetime(
-            base_date.year, base_date.month, base_date.day,
-            evt_hr, evt_min, 0,
-            tzinfo=timezone.utc
-        )
-        if evt_dt <= ann_dt:
-            # event time is earlier than announce → schedule for next week
-            evt_dt += timedelta(days=7)
+        # compute the matching event datetime *relative to the announcement*
+        event_dt = compute_next_occurrence(ed, eh, em, now=announce_dt)
+        next_event_unix = int(event_dt.timestamp())
 
-        next_event_unix = int(evt_dt.timestamp())
         last_posted = int(data.get("last_posted_unix", 0))
         if last_posted >= next_event_unix:
-            return  # already posted for this event
+            return
 
-        # lock & double-check
         async with self._lock:
+            # double-check under lock
             data2 = await self.config.guild(guild).all()
             if int(data2.get("last_posted_unix", 0)) >= next_event_unix:
                 return
@@ -157,54 +144,53 @@ class FridayGameNight(commands.Cog):
                     pass
                 await self.config.guild(guild).last_posted_unix.set(next_event_unix)
             except discord.Forbidden:
-                self.bot.logger.warning(
-                    "FGN cannot send to %s in guild %s", chan_id, guild.id
-                )
+                self.bot.logger.warning("FGN cannot send to %s in guild %s", chan_id, guild.id)
             except Exception:
-                self.bot.logger.exception(
-                    "FGN failed posting in %s:%s", guild.id, chan_id
-                )
+                self.bot.logger.exception("FGN failed posting in %s:%s", guild.id, chan_id)
 
     @commands.group(invoke_without_command=True)
     @commands.guild_only()
     async def gamenight(self, ctx: commands.Context):
-        """Configure/view the weekly Game Night announcer."""
+        """Configure or view your weekly Game Night announcer."""
         await ctx.send_help(ctx.command)
 
     @gamenight.command()
     @commands.check(mod_check)
     async def enable(self, ctx: commands.Context):
-        """Enable the weekly announcer."""
+        """Enable automatic game night announcements."""
         await self.config.guild(ctx.guild).enabled.set(True)
         await ctx.send("✅ FridayGameNight enabled.")
 
     @gamenight.command()
     @commands.check(mod_check)
     async def disable(self, ctx: commands.Context):
-        """Disable the weekly announcer."""
+        """Disable automatic game night announcements."""
         await self.config.guild(ctx.guild).enabled.set(False)
         await ctx.send("❌ FridayGameNight disabled.")
 
     @gamenight.command()
     @commands.check(mod_check)
     async def status(self, ctx: commands.Context):
-        """Show current settings and next times."""
+        """Show current configuration and next announce/event times."""
         data = await self.config.guild(ctx.guild).all()
         enabled = data.get("enabled", False)
         ch_id = data.get("channel_id")
-        msg = data.get("message", DEFAULT_MESSAGE)
-        day = int(data.get("day", 5))
-        ann_hr = int(data.get("announce_hour", 9))
-        ann_min = int(data.get("announce_minute", 0))
-        evt_hr = int(data.get("hour", 19))
-        evt_min = int(data.get("minute", 30))
+        tmpl = data.get("message", DEFAULT_MESSAGE)
+
+        ad = int(data.get("announce_day", 4))
+        ah = int(data.get("announce_hour", 9))
+        am = int(data.get("announce_minute", 0))
+        ed = int(data.get("event_day", 5))
+        eh = int(data.get("event_hour", 19))
+        em = int(data.get("event_minute", 30))
         last_posted = int(data.get("last_posted_unix", 0))
 
-        next_ann = compute_next_occurrence(day, ann_hr, ann_min)
-        next_evt = compute_next_occurrence(day, evt_hr, evt_min)
+        next_ann = compute_next_occurrence(ad, ah, am)
+        next_evt = compute_next_occurrence(ed, eh, em)
 
         embed = discord.Embed(title="FridayGameNight Status", color=discord.Color.blurple())
         embed.add_field(name="Enabled", value=str(enabled), inline=True)
+
         if ch_id:
             ch = ctx.guild.get_channel(ch_id)
             embed.add_field(name="Channel", value=(ch.mention if ch else f"<#{ch_id}>"), inline=True)
@@ -212,21 +198,23 @@ class FridayGameNight(commands.Cog):
             embed.add_field(name="Channel", value="Not set", inline=True)
 
         embed.add_field(
-            name="Next Announcement (UTC)",
-            value=f"{next_ann:%Y-%m-%d %H:%M}\n<t:{int(next_ann.timestamp())}:t> (<t:{int(next_ann.timestamp())}:R>)",
+            name="Next Announcement",
+            value=f"{next_ann:%a %Y-%m-%d %H:%M UTC}\n<t:{int(next_ann.timestamp())}:t> (<t:{int(next_ann.timestamp())}:R>)",
             inline=False,
         )
         embed.add_field(
-            name="Next Event (UTC)",
-            value=f"{next_evt:%Y-%m-%d %H:%M}\n<t:{int(next_evt.timestamp())}:t> (<t:{int(next_evt.timestamp())}:R>)",
+            name="Next Event",
+            value=f"{next_evt:%a %Y-%m-%d %H:%M UTC}\n<t:{int(next_evt.timestamp())}:t> (<t:{int(next_evt.timestamp())}:R>)",
             inline=False,
         )
 
-        embed.add_field(name="Day (1=Mon..7=Sun)", value=str(day), inline=True)
-        embed.add_field(name="Announcement Time (HH:MM UTC)", value=f"{ann_hr:02d}:{ann_min:02d}", inline=True)
-        embed.add_field(name="Event Time (HH:MM UTC)", value=f"{evt_hr:02d}:{evt_min:02d}", inline=True)
+        embed.add_field(name="Announce Day (1=Mon..7=Sun)", value=str(ad), inline=True)
+        embed.add_field(name="Announce Time (HH:MM UTC)", value=f"{ah:02d}:{am:02d}", inline=True)
+        embed.add_field(name="Event Day (1=Mon..7=Sun)", value=str(ed), inline=True)
+        embed.add_field(name="Event Time (HH:MM UTC)", value=f"{eh:02d}:{em:02d}", inline=True)
 
-        preview = re.sub(r"\{\s*unix\s*\}", str(int(next_evt.timestamp())), msg, flags=re.IGNORECASE)
+        # show preview with that next event timestamp
+        preview = re.sub(r"\{\s*unix\s*\}", str(int(next_evt.timestamp())), tmpl, flags=re.IGNORECASE)
         if len(preview) > 1000:
             preview = preview[:990] + "…"
         embed.add_field(name="Message Preview", value=box(preview, lang=""), inline=False)
@@ -240,7 +228,7 @@ class FridayGameNight(commands.Cog):
     @gamenight.command(name="setchannel")
     @commands.check(mod_check)
     async def setchannel(self, ctx: commands.Context, *, channel: str):
-        """Set the channel for the announcement."""
+        """Set the channel for announcements."""
         chan_id: Optional[int] = None
         m = re.search(r"/channels/\d+/(\d+)", channel)
         if m:
@@ -259,7 +247,7 @@ class FridayGameNight(commands.Cog):
                 return await ctx.send("❌ Could not parse that channel.")
         ch_obj = ctx.guild.get_channel(chan_id)
         if ch_obj is None:
-            return await ctx.send("❌ Channel not found.")
+            return await ctx.send("❌ Channel not found in this guild.")
         await self.config.guild(ctx.guild).channel_id.set(chan_id)
         await ctx.send(f"✅ Channel set to {ch_obj.mention}.")
 
@@ -267,39 +255,24 @@ class FridayGameNight(commands.Cog):
     @commands.check(mod_check)
     async def setmessage(self, ctx: commands.Context, *, message: str):
         """
-        Set the announcement template.
-        Use `{unix}` in it to interpolate the event timestamp.
+        Set the announcement template. Use `{unix}` to insert the event timestamp.
         """
         await self.config.guild(ctx.guild).message.set(message)
         await ctx.send("✅ Message template updated.")
 
-    @gamenight.command(name="day")
+    @gamenight.command(name="announce_day")
     @commands.check(mod_check)
-    async def set_day(self, ctx: commands.Context, day: int):
-        """Set weekday of announcement/event (1=Mon .. 7=Sun)."""
+    async def set_announce_day(self, ctx: commands.Context, day: int):
+        """Set the weekday to *post* the announcement (1=Mon..7=Sun)."""
         if not 1 <= day <= 7:
             return await ctx.send("❌ Day must be between 1 and 7.")
-        await self.config.guild(ctx.guild).day.set(day)
-        await ctx.send(f"✅ Day set to {day}.")
-
-    @gamenight.command(name="time")
-    @commands.check(mod_check)
-    async def set_time(self, ctx: commands.Context, time_str: str):
-        """Set the *event* time (HH:MM UTC)."""
-        m = re.match(r"^(\d{1,2}):(\d{2})$", time_str.strip())
-        if not m:
-            return await ctx.send("❌ Format must be HH:MM.")
-        hr, mn = int(m.group(1)), int(m.group(2))
-        if not (0 <= hr < 24 and 0 <= mn < 60):
-            return await ctx.send("❌ Invalid time.")
-        await self.config.guild(ctx.guild).hour.set(hr)
-        await self.config.guild(ctx.guild).minute.set(mn)
-        await ctx.send(f"✅ Event time set to {hr:02d}:{mn:02d} UTC.")
+        await self.config.guild(ctx.guild).announce_day.set(day)
+        await ctx.send(f"✅ Announcement day set to {day}.")
 
     @gamenight.command(name="announce_time")
     @commands.check(mod_check)
-    async def set_announce(self, ctx: commands.Context, time_str: str):
-        """Set the *announcement* time (HH:MM UTC)."""
+    async def set_announce_time(self, ctx: commands.Context, time_str: str):
+        """Set the time (UTC) to *post* the announcement. Format HH:MM."""
         m = re.match(r"^(\d{1,2}):(\d{2})$", time_str.strip())
         if not m:
             return await ctx.send("❌ Format must be HH:MM.")
@@ -310,9 +283,32 @@ class FridayGameNight(commands.Cog):
         await self.config.guild(ctx.guild).announce_minute.set(mn)
         await ctx.send(f"✅ Announcement time set to {hr:02d}:{mn:02d} UTC.")
 
+    @gamenight.command(name="event_day")
+    @commands.check(mod_check)
+    async def set_event_day(self, ctx: commands.Context, day: int):
+        """Set the weekday for the *event* itself (1=Mon..7=Sun)."""
+        if not 1 <= day <= 7:
+            return await ctx.send("❌ Day must be between 1 and 7.")
+        await self.config.guild(ctx.guild).event_day.set(day)
+        await ctx.send(f"✅ Event day set to {day}.")
+
+    @gamenight.command(name="event_time")
+    @commands.check(mod_check)
+    async def set_event_time(self, ctx: commands.Context, time_str: str):
+        """Set the time (UTC) for the *event*. Format HH:MM."""
+        m = re.match(r"^(\d{1,2}):(\d{2})$", time_str.strip())
+        if not m:
+            return await ctx.send("❌ Format must be HH:MM.")
+        hr, mn = int(m.group(1)), int(m.group(2))
+        if not (0 <= hr < 24 and 0 <= mn < 60):
+            return await ctx.send("❌ Invalid time.")
+        await self.config.guild(ctx.guild).event_hour.set(hr)
+        await self.config.guild(ctx.guild).event_minute.set(mn)
+        await ctx.send(f"✅ Event time set to {hr:02d}:{mn:02d} UTC.")
+
     @commands.is_owner()
     @gamenight.command(name="raw")
     async def _raw_config(self, ctx: commands.Context):
-        """[Owner] Dump raw guild config."""
+        """[Owner only] Dump the raw guild config."""
         data = await self.config.guild(ctx.guild).all()
         await ctx.send(box(str(data)))
