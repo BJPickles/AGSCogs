@@ -11,8 +11,13 @@ from redbot.core.utils.chat_formatting import box
 
 DEFAULT_MESSAGE = (
     "## FRIDAY NIGHT GAME NIGHT\n"
-    "Hello folks, happy Friday! Weekly game night starts at <t:{unix}:t> (<t:{unix}:R>).\n\n"
+    "Hello <@&1441728661307920477>! It's almost Friday! **Game Night™** starts tomorrow at <t:{unix}:t> (<t:{unix}:R>).\n\n"
     "Pop a reaction below if you're planning on joining 🔥"
+)
+
+DEFAULT_EVENT_MESSAGE = (
+    "## GAME NIGHT STARTING NOW\n"
+    "Hello <@&1441728661307920477>! **Game Night™** is starting now! <t:{unix}:t> (<t:{unix}:R>)."
 )
 
 def userday_to_pyweekday(userday: int) -> int:
@@ -78,13 +83,15 @@ class FridayGameNight(commands.Cog):
             enabled=False,
             channel_id=None,
             message=DEFAULT_MESSAGE,
-            announce_day=4,     # Thu
+            announce_day=4,      # Thursday
             announce_hour=9,
             announce_minute=0,
-            event_day=5,        # Fri
+            event_day=5,         # Friday
             event_hour=19,
             event_minute=30,
             last_posted_unix=0,
+            event_message=DEFAULT_EVENT_MESSAGE,
+            last_event_posted_unix=0,
         )
         self._task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
@@ -125,6 +132,7 @@ class FridayGameNight(commands.Cog):
         if channel is None:
             return
 
+        # load schedules
         ad = int(data.get("announce_day", 4))
         ah = int(data.get("announce_hour", 9))
         am = int(data.get("announce_minute", 0))
@@ -132,39 +140,62 @@ class FridayGameNight(commands.Cog):
         eh = int(data.get("event_hour", 19))
         em = int(data.get("event_minute", 30))
 
-        # Find the most recent announce time ≤ now
+        # ─── ANNOUNCEMENT ───
         last_announce = compute_last_occurrence(ad, ah, am, now)
-        # Only proceed if we're within 5 minutes after it
-        if not (last_announce <= now <= last_announce + timedelta(minutes=5)):
-            return
+        if last_announce <= now <= last_announce + timedelta(minutes=5):
+            event_dt = compute_next_occurrence(ed, eh, em, now=last_announce)
+            next_event_unix = int(event_dt.timestamp())
+            last_posted = int(data.get("last_posted_unix", 0))
+            if last_posted < next_event_unix:
+                async with self._lock:
+                    data2 = await self.config.guild(guild).all()
+                    if int(data2.get("last_posted_unix", 0)) < next_event_unix:
+                        template = data2.get("message", DEFAULT_MESSAGE)
+                        final = re.sub(r"\{\s*unix\s*\}", str(next_event_unix), template, flags=re.IGNORECASE)
+                        allowed = discord.AllowedMentions(roles=True, users=True, everyone=False)
+                        try:
+                            sent = await channel.send(final, allowed_mentions=allowed)
+                            try:
+                                await sent.add_reaction("🔥")
+                            except:
+                                pass
+                            await self.config.guild(guild).last_posted_unix.set(next_event_unix)
+                        except discord.Forbidden:
+                            self.bot.logger.warning(
+                                "FGN cannot send announcement to %s in guild %s", chan_id, guild.id
+                            )
+                        except Exception:
+                            self.bot.logger.exception(
+                                "FGN failed announcement in %s:%s", guild.id, chan_id
+                            )
 
-        # Compute the event timestamp based off that announce
-        event_dt = compute_next_occurrence(ed, eh, em, now=last_announce)
-        next_event_unix = int(event_dt.timestamp())
-
-        last_posted = int(data.get("last_posted_unix", 0))
-        if last_posted >= next_event_unix:
-            return
-
-        async with self._lock:
-            data2 = await self.config.guild(guild).all()
-            if int(data2.get("last_posted_unix", 0)) >= next_event_unix:
-                return
-
-            template = data2.get("message", DEFAULT_MESSAGE)
-            final = re.sub(r"\{\s*unix\s*\}", str(next_event_unix), template, flags=re.IGNORECASE)
-            allowed = discord.AllowedMentions(roles=True, users=True, everyone=False)
-            try:
-                sent = await channel.send(final, allowed_mentions=allowed)
-                try:
-                    await sent.add_reaction("🔥")
-                except Exception:
-                    pass
-                await self.config.guild(guild).last_posted_unix.set(next_event_unix)
-            except discord.Forbidden:
-                self.bot.logger.warning("FGN cannot send to %s in guild %s", chan_id, guild.id)
-            except Exception:
-                self.bot.logger.exception("FGN failed posting in %s:%s", guild.id, chan_id)
+        # ─── EVENT‐START REMINDER ───
+        last_event = compute_last_occurrence(ed, eh, em, now)
+        if last_event <= now <= last_event + timedelta(minutes=5):
+            next_event_unix = int(last_event.timestamp())
+            last_ev_posted = int(data.get("last_event_posted_unix", 0))
+            if last_ev_posted < next_event_unix:
+                async with self._lock:
+                    data3 = await self.config.guild(guild).all()
+                    if int(data3.get("last_event_posted_unix", 0)) < next_event_unix:
+                        ev_tmpl = data3.get("event_message", DEFAULT_EVENT_MESSAGE)
+                        ev_msg = re.sub(r"\{\s*unix\s*\}", str(next_event_unix), ev_tmpl, flags=re.IGNORECASE)
+                        allowed = discord.AllowedMentions(roles=True, users=True, everyone=False)
+                        try:
+                            sent2 = await channel.send(ev_msg, allowed_mentions=allowed)
+                            try:
+                                await sent2.add_reaction("🎉")
+                            except:
+                                pass
+                            await self.config.guild(guild).last_event_posted_unix.set(next_event_unix)
+                        except discord.Forbidden:
+                            self.bot.logger.warning(
+                                "FGN cannot send event reminder to %s in guild %s", chan_id, guild.id
+                            )
+                        except Exception:
+                            self.bot.logger.exception(
+                                "FGN failed event reminder in %s:%s", guild.id, chan_id
+                            )
 
     @commands.group(invoke_without_command=True)
     @commands.guild_only()
@@ -194,7 +225,7 @@ class FridayGameNight(commands.Cog):
         enabled = data.get("enabled", False)
         ch_id = data.get("channel_id")
         tmpl = data.get("message", DEFAULT_MESSAGE)
-
+        ev_tmpl = data.get("event_message", DEFAULT_EVENT_MESSAGE)
         ad = int(data.get("announce_day", 4))
         ah = int(data.get("announce_hour", 9))
         am = int(data.get("announce_minute", 0))
@@ -202,6 +233,7 @@ class FridayGameNight(commands.Cog):
         eh = int(data.get("event_hour", 19))
         em = int(data.get("event_minute", 30))
         last_posted = int(data.get("last_posted_unix", 0))
+        last_ev_posted = int(data.get("last_event_posted_unix", 0))
 
         next_ann = compute_next_occurrence(ad, ah, am)
         next_evt = compute_next_occurrence(ed, eh, em)
@@ -215,27 +247,43 @@ class FridayGameNight(commands.Cog):
         )
         embed.add_field(
             name="Next Announcement",
-            value=f"{next_ann:%a %Y-%m-%d %H:%M UTC}\n<t:{int(next_ann.timestamp())}:t> (<t:{int(next_ann.timestamp())}:R>)",
-            inline=False,
+            value=(
+                f"{next_ann:%a %Y-%m-%d %H:%M UTC}\n"
+                f"<t:{int(next_ann.timestamp())}:t> (<t:{int(next_ann.timestamp())}:R>)"
+            ),
+            inline=False
         )
         embed.add_field(
             name="Next Event",
-            value=f"{next_evt:%a %Y-%m-%d %H:%M UTC}\n<t:{int(next_evt.timestamp())}:t> (<t:{int(next_evt.timestamp())}:R>)",
-            inline=False,
+            value=(
+                f"{next_evt:%a %Y-%m-%d %H:%M UTC}\n"
+                f"<t:{int(next_evt.timestamp())}:t> (<t:{int(next_evt.timestamp())}:R>)"
+            ),
+            inline=False
         )
         embed.add_field(name="Announce Day", value=str(ad), inline=True)
         embed.add_field(name="Announce Time", value=f"{ah:02d}:{am:02d} UTC", inline=True)
         embed.add_field(name="Event Day", value=str(ed), inline=True)
         embed.add_field(name="Event Time", value=f"{eh:02d}:{em:02d} UTC", inline=True)
 
+        # Preview announcement
         preview = re.sub(r"\{\s*unix\s*\}", str(int(next_evt.timestamp())), tmpl, flags=re.IGNORECASE)
         if len(preview) > 1000:
             preview = preview[:990] + "…"
         embed.add_field(name="Message Preview", value=box(preview, lang=""), inline=False)
 
+        # Preview event-start message
+        ev_preview = re.sub(r"\{\s*unix\s*\}", str(int(next_evt.timestamp())), ev_tmpl, flags=re.IGNORECASE)
+        if len(ev_preview) > 1000:
+            ev_preview = ev_preview[:990] + "…"
+        embed.add_field(name="Event-Start Preview", value=box(ev_preview, lang=""), inline=False)
+
         if last_posted:
             lp = datetime.fromtimestamp(last_posted, tz=timezone.utc)
-            embed.set_footer(text=f"Last posted for event at {lp:%Y-%m-%d %H:%M UTC} (unix {last_posted})")
+            embed.set_footer(text=(
+                f"Last announced for event at {lp:%Y-%m-%d %H:%M UTC} (unix {last_posted}), "
+                f"last reminder at unix {last_ev_posted}"
+            ))
         await ctx.send(embed=embed)
 
     @gamenight.command(name="setchannel")
@@ -271,7 +319,19 @@ class FridayGameNight(commands.Cog):
         Set the announcement template. Use `{unix}` to insert the event timestamp.
         """
         await self.config.guild(ctx.guild).message.set(message)
+        # reset guard so you can retest immediately
+        await self.config.guild(ctx.guild).last_posted_unix.set(0)
         await ctx.send("✅ Message template updated.")
+
+    @gamenight.command(name="seteventmessage")
+    @commands.check(mod_check)
+    async def set_event_message(self, ctx: commands.Context, *, message: str):
+        """
+        Set the event‐start reminder template. Use `{unix}` to insert the event timestamp.
+        """
+        await self.config.guild(ctx.guild).event_message.set(message)
+        await self.config.guild(ctx.guild).last_event_posted_unix.set(0)
+        await ctx.send("✅ Event‐start reminder template updated.")
 
     @gamenight.command(name="announce_day")
     @commands.check(mod_check)
@@ -280,7 +340,6 @@ class FridayGameNight(commands.Cog):
         if not 1 <= day <= 7:
             return await ctx.send("❌ Day must be between 1 and 7.")
         await self.config.guild(ctx.guild).announce_day.set(day)
-        # reset the “already posted” guard so you can retest immediately
         await self.config.guild(ctx.guild).last_posted_unix.set(0)
         await ctx.send(f"✅ Announcement day set to {day}.")
 
@@ -296,7 +355,6 @@ class FridayGameNight(commands.Cog):
             return await ctx.send("❌ Invalid time.")
         await self.config.guild(ctx.guild).announce_hour.set(hr)
         await self.config.guild(ctx.guild).announce_minute.set(mn)
-        # reset the “already posted” guard so you can retest immediately
         await self.config.guild(ctx.guild).last_posted_unix.set(0)
         await ctx.send(f"✅ Announcement time set to {hr:02d}:{mn:02d} UTC.")
 
@@ -307,8 +365,8 @@ class FridayGameNight(commands.Cog):
         if not 1 <= day <= 7:
             return await ctx.send("❌ Day must be between 1 and 7.")
         await self.config.guild(ctx.guild).event_day.set(day)
-        # reset so changing the event schedule also allows immediate retest
         await self.config.guild(ctx.guild).last_posted_unix.set(0)
+        await self.config.guild(ctx.guild).last_event_posted_unix.set(0)
         await ctx.send(f"✅ Event day set to {day}.")
 
     @gamenight.command(name="event_time")
@@ -323,8 +381,8 @@ class FridayGameNight(commands.Cog):
             return await ctx.send("❌ Invalid time.")
         await self.config.guild(ctx.guild).event_hour.set(hr)
         await self.config.guild(ctx.guild).event_minute.set(mn)
-        # reset so changing the event schedule also allows immediate retest
         await self.config.guild(ctx.guild).last_posted_unix.set(0)
+        await self.config.guild(ctx.guild).last_event_posted_unix.set(0)
         await ctx.send(f"✅ Event time set to {hr:02d}:{mn:02d} UTC.")
 
     @commands.is_owner()
