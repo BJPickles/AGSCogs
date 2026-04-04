@@ -22,7 +22,7 @@ DEFAULT_EVENT_MESSAGE = (
 )
 
 def userday_to_pyweekday(userday: int) -> int:
-    # 1=Monday..7=Sunday → 0..6
+    # 1=Monday .. 7=Sunday → 0..6
     return (userday - 1) % 7
 
 def compute_next_occurrence(
@@ -43,7 +43,9 @@ def compute_next_occurrence(
     target_wd = userday_to_pyweekday(user_day)
     days_ahead = (target_wd - now.weekday()) % 7
     candidate = datetime(
-        now.year, now.month, now.day, hour, minute, 0, tzinfo=tzinfo
+        now.year, now.month, now.day,
+        hour, minute, 0,
+        tzinfo=tzinfo
     ) + timedelta(days=days_ahead)
     if candidate <= now:
         candidate += timedelta(days=7)
@@ -57,8 +59,8 @@ def compute_last_occurrence(
     tzinfo: timezone | ZoneInfo = timezone.utc,
 ) -> datetime:
     """
-    Return the most recent occurrence at or before 'now' of the given
-    weekday+time, in the given tzinfo (handles DST folds/unfolds).
+    Return the most recent occurrence at or before 'now' of the given weekday+time,
+    in the given tzinfo (handles DST folds/unfolds).
     """
     if now is None:
         now = datetime.now(tzinfo)
@@ -67,10 +69,11 @@ def compute_last_occurrence(
     target_wd = userday_to_pyweekday(user_day)
     days_ago = (now.weekday() - target_wd) % 7
     candidate = datetime(
-        now.year, now.month, now.day, hour, minute, 0, tzinfo=tzinfo
+        now.year, now.month, now.day,
+        hour, minute, 0,
+        tzinfo=tzinfo
     ) - timedelta(days=days_ago)
     if candidate > now:
-        # in case of DST‐fold issues
         candidate -= timedelta(days=7)
     return candidate
 
@@ -88,7 +91,7 @@ class FridayGameNight(commands.Cog):
         self.config.register_guild(
             enabled=False,
             channel_id=None,
-            timezone="UTC",                     # <- new
+            timezone="UTC",                     # new field!
             message=DEFAULT_MESSAGE,
             announce_day=4,      # Thursday
             announce_hour=9,
@@ -155,8 +158,6 @@ class FridayGameNight(commands.Cog):
         em = int(data["event_minute"])
 
         # ─── DST GUARD RESET ───
-        # If next scheduled announcement or event in UTC is now *before* our last_posted,
-        # we must have hit a DST‐ or offset‐shift.  Zero them out so we don't skip.
         next_ann = compute_next_occurrence(ad, ah, am, now=now_utc, tzinfo=tz)
         next_evt = compute_next_occurrence(ed, eh, em, now=now_utc, tzinfo=tz)
 
@@ -174,10 +175,8 @@ class FridayGameNight(commands.Cog):
         last_ann_local = compute_last_occurrence(ad, ah, am, now=now_utc, tzinfo=tz)
         last_ann_utc = last_ann_local.astimezone(timezone.utc)
         if last_ann_utc <= now_utc <= last_ann_utc + timedelta(minutes=5):
-            # figure out *this* event's timestamp
             event_local = compute_next_occurrence(ed, eh, em, now=last_ann_utc, tzinfo=tz)
             event_unix = int(event_local.timestamp())
-            # re‐read guard
             lp = int(await self.config.guild(guild).last_posted_unix())
             if lp < event_unix:
                 async with self._lock:
@@ -303,16 +302,17 @@ class FridayGameNight(commands.Cog):
         embed.add_field(name="Event Day",      value=str(ed), inline=True)
         embed.add_field(name="Event Time",     value=f"{eh:02d}:{em:02d}", inline=True)
 
-        # preview
+        # Preview announcement
         preview = re.sub(r"\{\s*unix\s*\}", str(int(next_evt.timestamp())), data.get("message", DEFAULT_MESSAGE), flags=re.IGNORECASE)
         if len(preview) > 1000:
             preview = preview[:990] + "…"
         embed.add_field(name="Message Preview", value=box(preview, lang=""), inline=False)
 
+        # Preview event-start reminder
         ev_preview = re.sub(r"\{\s*unix\s*\}", str(int(next_evt.timestamp())), data.get("event_message", DEFAULT_EVENT_MESSAGE), flags=re.IGNORECASE)
         if len(ev_preview) > 1000:
             ev_preview = ev_preview[:990] + "…"
-        embed.add_field(name="Event‐Start Preview", value=box(ev_preview, lang=""), inline=False)
+        embed.add_field(name="Event-Start Preview", value=box(ev_preview, lang=""), inline=False)
 
         await ctx.send(embed=embed)
 
@@ -345,7 +345,9 @@ class FridayGameNight(commands.Cog):
     @gamenight.command(name="setmessage")
     @commands.check(mod_check)
     async def setmessage(self, ctx: commands.Context, *, message: str):
-        """Set the announcement template. Use `{unix}` to insert the event timestamp."""
+        """
+        Set the announcement template. Use `{unix}` to insert the event timestamp.
+        """
         await self.config.guild(ctx.guild).message.set(message)
         await self.config.guild(ctx.guild).last_posted_unix.set(0)
         await ctx.send("✅ Message template updated.")
@@ -353,10 +355,12 @@ class FridayGameNight(commands.Cog):
     @gamenight.command(name="seteventmessage")
     @commands.check(mod_check)
     async def set_event_message(self, ctx: commands.Context, *, message: str):
-        """Set the event‐start reminder template. Use `{unix}` to insert the event timestamp."""
+        """
+        Set the event-start reminder template. Use `{unix}` to insert the event timestamp.
+        """
         await self.config.guild(ctx.guild).event_message.set(message)
         await self.config.guild(ctx.guild).last_event_posted_unix.set(0)
-        await ctx.send("✅ Event‐start reminder template updated.")
+        await ctx.send("✅ Event-start reminder template updated.")
 
     @gamenight.command(name="announce_day")
     @commands.check(mod_check)
@@ -371,7 +375,7 @@ class FridayGameNight(commands.Cog):
     @gamenight.command(name="announce_time")
     @commands.check(mod_check)
     async def set_announce_time(self, ctx: commands.Context, time_str: str):
-        """Set the time (in your guild‐timezone!) to post the announcement. Format HH:MM."""
+        """Set the time (in your guild’s timezone!) to post the announcement. Format HH:MM."""
         m = re.match(r"^(\d{1,2}):(\d{2})$", time_str.strip())
         if not m:
             return await ctx.send("❌ Format must be HH:MM.")
@@ -381,7 +385,7 @@ class FridayGameNight(commands.Cog):
         await self.config.guild(ctx.guild).announce_hour.set(hr)
         await self.config.guild(ctx.guild).announce_minute.set(mn)
         await self.config.guild(ctx.guild).last_posted_unix.set(0)
-        await ctx.send(f"✅ Announcement time set to {hr:02d}:{mn:02d} ({data.get('timezone','UTC')}).")
+        await ctx.send(f"✅ Announcement time set to {hr:02d}:{mn:02d} (in your guild’s timezone).")
 
     @gamenight.command(name="event_day")
     @commands.check(mod_check)
@@ -397,7 +401,7 @@ class FridayGameNight(commands.Cog):
     @gamenight.command(name="event_time")
     @commands.check(mod_check)
     async def set_event_time(self, ctx: commands.Context, time_str: str):
-        """Set the time (in your guild‐timezone!) for the event. Format HH:MM."""
+        """Set the time (in your guild’s timezone!) for the event. Format HH:MM."""
         m = re.match(r"^(\d{1,2}):(\d{2})$", time_str.strip())
         if not m:
             return await ctx.send("❌ Format must be HH:MM.")
@@ -408,7 +412,27 @@ class FridayGameNight(commands.Cog):
         await self.config.guild(ctx.guild).event_minute.set(mn)
         await self.config.guild(ctx.guild).last_posted_unix.set(0)
         await self.config.guild(ctx.guild).last_event_posted_unix.set(0)
-        await ctx.send(f"✅ Event time set to {hr:02d}:{mn:02d} ({data.get('timezone','UTC')}).")
+        await ctx.send(f"✅ Event time set to {hr:02d}:{mn:02d} (in your guild’s timezone).")
+
+    @gamenight.command(name="settimezone")
+    @commands.check(mod_check)
+    async def set_timezone(self, ctx: commands.Context, timezone_name: str):
+        """
+        Set the IANA timezone for this guild’s announcements/events.
+        Example: Europe/London, America/New_York, UTC, etc.
+        All announce_time / event_time values are then interpreted in that zone.
+        """
+        try:
+            ZoneInfo(timezone_name)
+        except Exception:
+            return await ctx.send(
+                "❌ Invalid timezone. Please supply a valid IANA name "
+                "(e.g. Europe/London, America/New_York, UTC)."
+            )
+        await self.config.guild(ctx.guild).timezone.set(timezone_name)
+        await self.config.guild(ctx.guild).last_posted_unix.set(0)
+        await self.config.guild(ctx.guild).last_event_posted_unix.set(0)
+        await ctx.send(f"✅ Timezone set to `{timezone_name}`.")
 
     @commands.is_owner()
     @gamenight.command(name="raw")
