@@ -1,0 +1,16 @@
+{
+  "author": ["AGSCogs"],
+  "description": "Fetch random dad jokes on demand and schedule daily postings in a configured channel, with rotating pre-messages, timezone support, and full configuration commands.",
+  "disabled": false,
+  "end_user_data_statement": "Stores only guild configuration (channel, schedule, prefixes); no personal user data is stored.",
+  "hidden": false,
+  "install_msg": "Thank you for installing DailyDadJokes! Use `[p]dadjoke` to fetch a joke or configure daily posts with `[p]dadjoke enable` etc.",
+  "min_bot_version": "3.5.0",
+  "min_python_version": [3, 9, 1],
+  "permissions": [],
+  "required_cogs": {},
+  "requirements": ["aiohttp"],
+  "short": "Dad jokes on demand and daily scheduling",
+  "tags": ["fun", "dad", "jokes", "utility"],
+  "type": "COG"
+}
