@@ -306,6 +306,44 @@ class AGSOnThisDay(commands.Cog):
         view = ButtonView(dict(items)) if items else None
         return embed, view
 
+    def _standardize_date(self, raw_date: str) -> str:
+        """
+        Convert raw_date like '24 April 1479' or 'April 24, 1479' into 'DD / MM / YYYY'.
+        If parsing fails, return raw_date unchanged.
+        """
+        # Remove ordinal suffixes (st, nd, rd, th)
+        s = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', raw_date, flags=re.IGNORECASE).strip()
+        # Mapping for month names
+        month_map = {
+            "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+            "may": 5, "jun": 6, "jul": 7, "aug": 8,
+            "sep": 9, "oct": 10, "nov": 11, "dec": 12
+        }
+        # Patterns for Day Month Year and Month Day Year
+        patterns = [
+            (r'^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$', "DMY"),
+            (r'^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$', "MDY"),
+        ]
+        for pat, typ in patterns:
+            m = re.match(pat, s)
+            if not m:
+                continue
+            if typ == "DMY":
+                day_str, month_name, year_str = m.group(1), m.group(2), m.group(3)
+            else:  # MDY
+                month_name, day_str, year_str = m.group(1), m.group(2), m.group(3)
+            key = month_name.lower()[:3]
+            month = month_map.get(key)
+            if not month:
+                continue
+            try:
+                dt = datetime(int(year_str), month, int(day_str))
+                return f"{dt.day:02d} / {dt.month:02d} / {dt.year}"
+            except Exception:
+                continue
+        # Fallback: return original string
+        return raw_date
+
     # ────────────────────────────────────────────────────────
     #  Dispatch to three isolated scrapers
     # ────────────────────────────────────────────────────────
@@ -341,9 +379,15 @@ class AGSOnThisDay(commands.Cog):
             if year and desc.startswith(year):
                 desc = desc[len(year):].strip()
 
-            # now append the year at the bottom with 📅
+            # now append the full date (DD / MM / YYYY) at the bottom with 📅
             if year:
-                desc = f"{desc}\n\n📅 {year}"
+                try:
+                    yr_int = int(year)
+                    now_dt = datetime.now()
+                    date_str = f"{now_dt.day:02d} / {now_dt.month:02d} / {yr_int}"
+                except Exception:
+                    date_str = year
+                desc = f"{desc}\n\n📅 {date_str}"
 
             image = self._extract_best_image(chosen)
             wiki  = self._extract_wiki_links(chosen)
@@ -403,7 +447,8 @@ class AGSOnThisDay(commands.Cog):
                 # 4) build description
                 desc = fact_text
                 if fact_date:
-                    desc += f"\n\n📅 {fact_date}"
+                    formatted = self._standardize_date(fact_date)
+                    desc += f"\n\n📅 {formatted}"
 
                 # 5) image & wiki
                 image = self._extract_best_image(wrap)
@@ -452,7 +497,8 @@ class AGSOnThisDay(commands.Cog):
                 date_text = None
 
             if date_text:
-                desc = f"{desc_text[:3900]}\n\n📅 {date_text}"
+                formatted = self._standardize_date(date_text)
+                desc = f"{desc_text[:3900]}\n\n📅 {formatted}"
             else:
                 desc = desc_text[:4096]
 
