@@ -6,6 +6,7 @@ import random
 import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+from urllib.parse import urljoin
 
 import aiohttp
 from lxml import html
@@ -234,80 +235,177 @@ class AGSOnThisDay(commands.Cog):
         if tree is None:
             return await channel.send("❌ Failed to retrieve On This Day content.")
 
-        # parse main page image for embeds
-        main_img = None
-        imgs = tree.xpath(
-            "//figure[contains(@class,'calendar__figure-iob')]//img/@data-src | "
-            "//figure[contains(@class,'calendar__figure-iob')]//img/@src"
-        )
-        if imgs:
-            main_img = imgs[-1]
+        BASE = "https://www.onthisday.com"
 
-        # 1) TODAY IN HISTORY: top 5 via JSON, embed with main_img
-        events = await self._fetch_json_events()
-        if events:
-            top5 = events[:5]
-            lines = [f"**{e['year']}**: {e['description']}" for e in top5]
-            desc = "\n".join(lines)
+        # ─────────────────────────────────────────────
+        # Helpers
+        # ─────────────────────────────────────────────
+
+        def normalize_url(url: str | None) -> str | None:
+            if not url:
+                return None
+            url = url.strip()
+            if url.startswith("//"):
+                return "https:" + url
+            if url.startswith("/"):
+                return urljoin(BASE, url)
+            return url
+
+        def pick_best_from_srcset(raw: str) -> str:
+            parts = [p.strip().split(" ") for p in raw.split(",")]
+
+            def score(p):
+                if len(p) > 1:
+                    if p[1].endswith("w"):
+                        try:
+                            return int(p[1].replace("w", ""))
+                        except:
+                            return 0
+                    if p[1].endswith("x"):
+                        try:
+                            return float(p[1].replace("x", "")) * 1000
+                        except:
+                            return 0
+                return 0
+
+            parts.sort(key=score)
+            return parts[-1][0]
+
+        def extract_best_image(node) -> str | None:
+            imgs = node.xpath(
+                ".//picture/source[@data-srcset]/@data-srcset | "
+                ".//img[@data-src]/@data-src | "
+                ".//img[@src]/@src"
+            )
+            if not imgs:
+                return None
+
+            raw = imgs[-1]
+
+            if "," in raw:
+                url = pick_best_from_srcset(raw)
+            else:
+                url = raw.split(" ")[0]
+
+            url = normalize_url(url)
+
+            if url and any(x in url.lower() for x in ("svg", "logo", "icon")):
+                return None
+
+            return url
+
+        def extract_wiki_links(node) -> dict[str, str]:
             wiki: dict[str, str] = {}
-            for e in top5:
-                for w in e.get("wikipedia", []):
-                    t = w.get("title","").strip()
-                    u = w.get("wikipedia")
-                    if t and u:
-                        wiki[t] = u
+            for a in node.xpath(".//a[contains(@href,'wikipedia.org')]"):
+                href = normalize_url(a.get("href"))
+                label = a.text_content().strip() or href
+                if href and label not in wiki:
+                    wiki[label[:80]] = href
+            return wiki
+
+        def build_embed(title: str, desc: str, thumb: str | None, image: str | None, wiki: dict[str, str]):
             embed = discord.Embed(
-                title="TODAY IN HISTORY",
+                title=title,
                 description=desc,
                 color=EMBED_COLOR,
             )
-            embed.set_thumbnail(url=THUMBNAILS["events"])
-            if main_img:
-                embed.set_image(url=main_img)
+            if thumb:
+                embed.set_thumbnail(url=thumb)
+            if image:
+                embed.set_image(url=image)
             embed.set_footer(text="from onthisday.com")
-            view = ButtonView(wiki) if wiki else None
-            await channel.send(embed=embed, view=view)
 
-        # 2) DID YOU KNOW?, FUN FACT, FEATURED ARTICLE from HTML
+            items = list(wiki.items())[:24]
+            view = ButtonView(dict(items)) if items else None
+            return embed, view
+
+        # ─────────────────────────────────────────────
+        # HERO (Featured Event)
+        # ─────────────────────────────────────────────
+
+        try:
+            main_img = tree.xpath("//meta[@property='og:image']/@content")
+            main_img = normalize_url(main_img[0]) if main_img else None
+
+            hero = tree.xpath(
+                "(//main//*[self::section or self::div or self::article][.//img][.//p])[1]"
+            )
+            if hero:
+                hero = hero[0]
+
+                paras = hero.xpath(".//p")
+                desc = "\n\n".join(
+                    p.text_content().strip()
+                    for p in paras
+                    if p.text_content().strip()
+                )[:4096]
+
+                if not desc or len(desc) < 50:
+                    raise ValueError("Hero content too small")
+
+                if not main_img:
+                    main_img = extract_best_image(hero)
+
+                wiki = extract_wiki_links(hero)
+
+                embed, view = build_embed(
+                    "TODAY IN HISTORY",
+                    desc,
+                    THUMBNAILS["events"],
+                    main_img,
+                    wiki
+                )
+
+                await channel.send(embed=embed, view=view)
+            else:
+                self.bot.logger.warning("OnThisDay: No hero section found")
+        except Exception:
+            self.bot.logger.exception("Failed to build hero embed")
+
+        # ─────────────────────────────────────────────
+        # SIDEBAR SECTIONS
+        # ─────────────────────────────────────────────
+
         html_sections = [
-            ("section--did-you-know",     "DID YOU KNOW?",        THUMBNAILS["did-you-know"]),
-            ("section--fun-fact",         "FUN FACT ABOUT TODAY", THUMBNAILS["fun-fact"]),
-            ("section--featured-article", "FEATURED ARTICLE",     THUMBNAILS["featured-article"]),
+            ("did-you-know",     "DID YOU KNOW?",        THUMBNAILS["did-you-know"]),
+            ("fun-fact",         "FUN FACT ABOUT TODAY", THUMBNAILS["fun-fact"]),
+            ("featured-article", "FEATURED ARTICLE",     THUMBNAILS["featured-article"]),
         ]
-        for cls, title, thumb in html_sections:
-            sec = tree.xpath(f"//section[contains(@class,'{cls}')]")
-            if not sec:
-                continue
-            sec = sec[0]
-            paras = sec.xpath(".//p")
-            descs = [p.text_content().strip() for p in paras if p.text_content().strip()]
-            description = "\n\n".join(descs)[:4096]
-            # optional section image
-            imgs = sec.xpath(
-                ".//img[@src and not(contains(@src,'.svg'))]/@src | "
-                ".//img[@data-src and not(contains(@data-src,'.svg'))]/@data-src"
-            )
-            section_img = imgs[-1] if imgs else None
-            # any wiki links
-            wiki: dict[str, str] = {}
-            for a in sec.xpath(".//a[contains(@href,'wikipedia.org')]"):
-                href = a.get("href")
-                label = a.text_content().strip() or href
-                wiki[label] = href
 
-            embed = discord.Embed(
-                title=title,
-                description=description,
-                color=EMBED_COLOR,
-            )
-            embed.set_thumbnail(url=thumb)
-            if section_img:
-                embed.set_image(url=section_img)
-            elif main_img:
-                embed.set_image(url=main_img)
-            embed.set_footer(text="from onthisday.com")
-            view = ButtonView(wiki) if wiki else None
-            await channel.send(embed=embed, view=view)
+        for cls, title, thumb in html_sections:
+            try:
+                sec = tree.xpath(
+                    f"(//section[contains(@class,'{cls}')] | "
+                    f"//div[contains(@class,'{cls}')])[1]"
+                )
+                if not sec:
+                    continue
+                sec = sec[0]
+
+                paras = sec.xpath(".//p")
+                description = "\n\n".join(
+                    p.text_content().strip()
+                    for p in paras
+                    if p.text_content().strip()
+                )[:4096]
+
+                if not description:
+                    continue
+
+                section_img = extract_best_image(sec) or main_img
+                wiki = extract_wiki_links(sec)
+
+                embed, view = build_embed(
+                    title,
+                    description,
+                    thumb,
+                    section_img,
+                    wiki
+                )
+
+                await channel.send(embed=embed, view=view)
+            except Exception:
+                self.bot.logger.exception(f"Failed to build section: {cls}")
 
     async def _get_next_prefix(self, guild: discord.Guild, data: dict | None = None) -> str:
         if data is None:
