@@ -31,6 +31,9 @@ DEFAULT_UA = (
 # Embed colour
 EMBED_COLOR = 0xCE9DC6
 
+# Allow the role mention in our prefix messages
+ALLOWED_MENTIONS = discord.AllowedMentions(roles=True)
+
 # Section thumbnails (PNG)
 THUMBNAILS = {
     "events":            "https://aegisgamestudios.co.uk/wp-content/uploads/2026/04/person-of-interest.png",
@@ -204,7 +207,7 @@ class AGSOnThisDay(commands.Cog):
                     if fresh["last_posted_unix"] < post_ts:
                         pre = await self._get_next_prefix(guild, fresh)
                         if pre:
-                            await channel.send(pre)
+                            await channel.send(pre, allowed_mentions=ALLOWED_MENTIONS)
                         await self._post_today(channel)
                         await self.config.guild(guild).last_posted_unix.set(post_ts)
 
@@ -308,18 +311,17 @@ class AGSOnThisDay(commands.Cog):
 
     def _standardize_date(self, raw_date: str) -> str:
         """
-        Convert raw_date like '24 April 1479' or 'April 24, 1479' into 'DD / MM / YYYY'.
+        Convert raw_date like '24 April 1479' or 'April 24, 1479'
+        into 'D Month YYYY' (e.g. '24 April 1479').
         If parsing fails, return raw_date unchanged.
         """
-        # Remove ordinal suffixes (st, nd, rd, th)
+        # Strip ordinal suffixes (st, nd, rd, th)
         s = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', raw_date, flags=re.IGNORECASE).strip()
-        # Mapping for month names
         month_map = {
             "jan": 1, "feb": 2, "mar": 3, "apr": 4,
             "may": 5, "jun": 6, "jul": 7, "aug": 8,
             "sep": 9, "oct": 10, "nov": 11, "dec": 12
         }
-        # Patterns for Day Month Year and Month Day Year
         patterns = [
             (r'^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$', "DMY"),
             (r'^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$', "MDY"),
@@ -330,7 +332,7 @@ class AGSOnThisDay(commands.Cog):
                 continue
             if typ == "DMY":
                 day_str, month_name, year_str = m.group(1), m.group(2), m.group(3)
-            else:  # MDY
+            else:
                 month_name, day_str, year_str = m.group(1), m.group(2), m.group(3)
             key = month_name.lower()[:3]
             month = month_map.get(key)
@@ -338,10 +340,10 @@ class AGSOnThisDay(commands.Cog):
                 continue
             try:
                 dt = datetime(int(year_str), month, int(day_str))
-                return f"{dt.day:02d} / {dt.month:02d} / {dt.year}"
+                # Day without leading zero if <10
+                return f"{dt.day} {dt.strftime('%B')} {dt.year}"
             except Exception:
                 continue
-        # Fallback: return original string
         return raw_date
 
     # ────────────────────────────────────────────────────────
@@ -374,17 +376,19 @@ class AGSOnThisDay(commands.Cog):
             year_nodes = chosen.xpath(".//a[contains(@class,'date')]/text()")
             year = year_nodes[0].strip() if year_nodes else None
 
-            # pull out the full text, strip leading year if present
+            # pull out full text, strip leading year if present
             desc = chosen.xpath("string()").strip()
             if year and desc.startswith(year):
                 desc = desc[len(year):].strip()
 
-            # now append the full date (DD / MM / YYYY) at the bottom with 📅
+            # now append the full date (e.g. "16 April 1479") at bottom
             if year:
                 try:
                     yr_int = int(year)
-                    now_dt = datetime.now()
-                    date_str = f"{now_dt.day:02d} / {now_dt.month:02d} / {yr_int}"
+                    today = datetime.now()
+                    month_name = today.strftime("%B")
+                    day = today.day
+                    date_str = f"{day} {month_name} {yr_int}"
                 except Exception:
                     date_str = year
                 desc = f"{desc}\n\n📅 {date_str}"
@@ -407,27 +411,20 @@ class AGSOnThisDay(commands.Cog):
 
     async def _post_fun_fact(self, tree, channel):
         try:
-            # grab every wrapper (covers both DID YOU KNOW and FUN FACT)
             wrappers = tree.xpath("//div[contains(@class,'wrapper')]")
-
             for wrap in wrappers:
-                # 1) get the <h2> title
                 h2 = wrap.xpath(".//h2")
                 if not h2:
                     continue
-                # clean up whitespace
                 title = re.sub(r"\s+", " ", h2[0].text_content()).strip()
-
-                # 2) choose thumbnail by title content
                 key = title.lower()
                 if "did you know" in key:
                     thumb = THUMBNAILS["did-you-know"]
                 elif "fun fact" in key:
                     thumb = THUMBNAILS["fun-fact"]
                 else:
-                    continue  # skip any other wrapper
+                    continue
 
-                # 3) extract the paragraphs: main text vs date line
                 paras = wrap.xpath(".//p")
                 fact_text = None
                 fact_date = None
@@ -435,7 +432,6 @@ class AGSOnThisDay(commands.Cog):
                     txt = p.text_content().strip()
                     if not txt:
                         continue
-                    # the date line carries class="fun-fact"
                     if "fun-fact" in (p.get("class") or ""):
                         fact_date = txt
                     else:
@@ -444,17 +440,14 @@ class AGSOnThisDay(commands.Cog):
                 if not fact_text:
                     continue
 
-                # 4) build description
                 desc = fact_text
                 if fact_date:
                     formatted = self._standardize_date(fact_date)
                     desc += f"\n\n📅 {formatted}"
 
-                # 5) image & wiki
                 image = self._extract_best_image(wrap)
                 wiki  = self._extract_wiki_links(wrap)
 
-                # 6) build & send
                 embed, view = self._build_embed(
                     title,
                     desc[:4096],
@@ -620,7 +613,7 @@ class AGSOnThisDay(commands.Cog):
         """Fetch & post today's content immediately (testing)."""
         prefix = await self._get_next_prefix(ctx.guild)
         if prefix:
-            await ctx.send(prefix)
+            await ctx.send(prefix, allowed_mentions=ALLOWED_MENTIONS)
         await self._post_today(ctx.channel)
 
 
