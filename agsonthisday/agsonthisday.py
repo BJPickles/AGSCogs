@@ -327,20 +327,34 @@ class AGSOnThisDay(commands.Cog):
                 self.bot.logger.warning("OnThisDay: no li.event found")
                 return
 
-            year_node = chosen.xpath(".//a[contains(@class,'date')]/text()")
-            year = year_node[0].strip() if year_node else None
+            # Extract year from the event
+            year_nodes = chosen.xpath(".//a[contains(@class,'date')]/text()")
+            year = year_nodes[0].strip() if year_nodes else None
 
-            desc = chosen.xpath("string()").strip()
-            if year and desc.startswith(year):
-                desc = desc[len(year):].strip()
-                desc = f"**{year}** – {desc}"
+            # Extract full text and strip the leading year if present
+            full_text = chosen.xpath("string()").strip()
+            desc_text = full_text
+            if year and full_text.startswith(year):
+                desc_text = full_text[len(year):].strip()
+
+            # Build today's date + the event year
+            today = datetime.now().date()
+            month_name = today.strftime("%B")
+            day = today.day
+            if year:
+                date_text = f"{month_name} {day}, {year}"
+            else:
+                date_text = f"{month_name} {day}"
+
+            # Append calendar emoji and formatted date
+            final_desc = f"{desc_text}\n\n📅 {date_text}"
 
             image = self._extract_best_image(chosen)
             wiki = self._extract_wiki_links(chosen)
 
             embed, view = self._build_embed(
                 "TODAY IN HISTORY",
-                desc[:4096],
+                final_desc[:4096],
                 THUMBNAILS["events"],
                 image,
                 wiki,
@@ -356,45 +370,57 @@ class AGSOnThisDay(commands.Cog):
                 self.bot.logger.debug("OnThisDay: no did-you-know section")
                 return
             sec = section[0]
-            paras = sec.xpath(".//p")
 
-            fact_text = None
-            fact_date = None
-
-            for p in paras:
-                txt = p.text_content().strip()
-                if not txt:
+            # Loop over each wrapper (Fun Fact or Did You Know)
+            wrappers = sec.xpath(".//div[contains(@class,'wrapper')]")
+            for wrapper in wrappers:
+                # Extract the heading/title
+                h2_nodes = wrapper.xpath(".//h2[contains(@class,'did-you-know__heading')]")
+                if not h2_nodes:
                     continue
-                if p.get("class","").strip() == "fun-fact":
-                    fact_date = txt
-                else:
-                    fact_text = txt
+                title = h2_nodes[0].text_content().strip()
 
-            if not fact_text:
-                self.bot.logger.debug("OnThisDay: no fun-fact text found")
-                return
+                # Extract paragraphs: the fact text vs. the date line
+                paras = wrapper.xpath(".//p")
+                fact_text = None
+                fact_date = None
+                for p in paras:
+                    cls = p.get("class", "").strip()
+                    txt = p.text_content().strip()
+                    if not txt:
+                        continue
+                    if "fun-fact" in cls:
+                        fact_date = txt
+                    else:
+                        fact_text = txt
 
-            desc = fact_text
-            if fact_date:
-                desc += f"\n\n📅 {fact_date}"
+                if not fact_text:
+                    continue
 
-            image = self._extract_best_image(sec)
-            wiki = self._extract_wiki_links(sec)
+                desc = fact_text
+                if fact_date:
+                    desc += f"\n\n📅 {fact_date}"
 
-            embed, view = self._build_embed(
-                "FUN FACT ABOUT TODAY",
-                desc[:4096],
-                THUMBNAILS["fun-fact"],
-                image,
-                wiki,
-            )
-            await channel.send(embed=embed, view=view)
+                # Pick thumbnail based on whether it's a Fun Fact or Did You Know
+                key = "fun-fact" if "fun fact" in title.lower() else "did-you-know"
+                thumb = THUMBNAILS.get(key)
+
+                image = self._extract_best_image(wrapper)
+                wiki = self._extract_wiki_links(wrapper)
+
+                embed, view = self._build_embed(
+                    title,
+                    desc[:4096],
+                    thumb,
+                    image,
+                    wiki,
+                )
+                await channel.send(embed=embed, view=view)
         except Exception:
-            self.bot.logger.exception("Failed to build FUN FACT section")
+            self.bot.logger.exception("Failed to build FUN FACT / DID YOU KNOW section")
 
     async def _post_featured_article(self, tree, channel):
         try:
-            # grab the first Featured‐Article section/div
             node = tree.xpath(
                 "(//section[contains(@class,'featured-article')]"
                 " | //div[contains(@class,'featured-article')])[1]"
@@ -403,23 +429,17 @@ class AGSOnThisDay(commands.Cog):
                 return
             art = node[0]
 
-            # 1) find the <p class="linked_text"> which holds both text + date
             p = art.xpath(".//p[contains(@class,'linked_text')]")
             if p:
                 p = p[0]
                 full = p.xpath("string()").strip()
-
-                # 2) pull out the date from <span class="linked_date">
                 date_node = p.xpath(".//span[contains(@class,'linked_date')]/text()")
                 date_text = date_node[0].strip() if date_node else None
-
-                # 3) strip that trailing date off the full text
                 if date_text and full.endswith(date_text):
                     desc_text = full[: -len(date_text)].rstrip()
                 else:
                     desc_text = full
             else:
-                # fallback: just join all <p>
                 paras = art.xpath(".//p")
                 parts = [x.text_content().strip() for x in paras if x.text_content().strip()]
                 if not parts:
@@ -427,14 +447,11 @@ class AGSOnThisDay(commands.Cog):
                 desc_text = "\n\n".join(parts)
                 date_text = None
 
-            # 4) build final description + 📅 date
             if date_text:
-                # leave a little headroom so we don’t overflow the 4096 limit
                 desc = f"{desc_text[:3900]}\n\n📅 {date_text}"
             else:
                 desc = desc_text[:4096]
 
-            # 5) image + wiki links as before
             image = self._extract_best_image(art)
             wiki = self._extract_wiki_links(art)
 
@@ -475,10 +492,6 @@ class AGSOnThisDay(commands.Cog):
         if not role:
             return tmpl.format(ping="")
         return tmpl.format(ping=role.mention)
-
-    # ────────────────────────────────────────────────────────
-    # COMMANDS
-    # ────────────────────────────────────────────────────────
 
     @commands.group(name="agsonthisday", invoke_without_command=True)
     @commands.guild_only()
