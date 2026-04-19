@@ -20,7 +20,7 @@ __red_end_user_data_statement__ = get_end_user_data_statement(__file__)
 TODAY_URL = "https://www.onthisday.com/today"
 ENDPOINT  = "https://byabbe.se/on-this-day/{}/events.json"
 
-# mimic a real browser UA so onthisday.com will respond
+# Browser‐style User-Agent so onthisday.com returns real content
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -134,7 +134,7 @@ class AGSOnThisDay(commands.Cog):
         return
 
     async def cog_load(self) -> None:
-        # supply a browser UA so onthisday.com returns full content
+        # Browser UA for onthisday.com
         self.session = aiohttp.ClientSession(headers={"User-Agent": DEFAULT_UA})
         self._task = self.bot.loop.create_task(self._background_loop())
 
@@ -184,16 +184,16 @@ class AGSOnThisDay(commands.Cog):
         pm = int(cfg.get("post_minute", 0))
 
         last_local = compute_last_daily(ph, pm, now=now_utc, tzinfo=tz)
-        last_utc = last_local.astimezone(timezone.utc)
+        last_utc   = last_local.astimezone(timezone.utc)
         next_local = compute_next_daily(ph, pm, now=now_utc, tzinfo=tz)
-        next_utc = next_local.astimezone(timezone.utc)
+        next_utc   = next_local.astimezone(timezone.utc)
 
         last_posted = int(cfg.get("last_posted_unix", 0))
         if last_posted > int(next_utc.timestamp()):
             await self.config.guild(guild).last_posted_unix.set(0)
             last_posted = 0
 
-        now_ts = now_utc.timestamp()
+        now_ts       = now_utc.timestamp()
         window_start = last_utc.timestamp()
         if window_start <= now_ts <= window_start + 300:
             post_ts = int(window_start)
@@ -208,7 +208,7 @@ class AGSOnThisDay(commands.Cog):
                                 await channel.send(prefix)
                             except Exception:
                                 pass
-                        # validate via original API before scraping
+                        # validate via original JSON API
                         if not await self._validate_api():
                             await channel.send("❌ Validation via API failed; no events today.")
                         else:
@@ -216,12 +216,11 @@ class AGSOnThisDay(commands.Cog):
                         await self.config.guild(guild).last_posted_unix.set(post_ts)
 
     async def _validate_api(self) -> bool:
-        """Hit the original JSON API to ensure events exist for today's date."""
+        """Hit the byabbe.se JSON API to ensure events exist for today's date."""
         if not self.session:
             return False
         now = datetime.now()
-        month = now.month
-        day   = now.day
+        month, day = now.month, now.day
         try:
             async with self.session.get(ENDPOINT.format(f"{month}/{day}")) as resp:
                 if resp.status != 200:
@@ -272,8 +271,9 @@ class AGSOnThisDay(commands.Cog):
         return description, image_url, wiki
 
     def _parse_today_in_history(
-        self, tree: html.HtmlElement
+        self, tree: html.HtmlElement, title: str
     ) -> tuple[str, str | None, dict[str, str]] | None:
+        # signature now matches parse_section
         hdr = tree.xpath("//h2[contains(normalize-space(), 'Today in History')]")
         if not hdr:
             return None
@@ -430,6 +430,9 @@ class AGSOnThisDay(commands.Cog):
         prefix = await self._get_next_prefix(ctx.guild)
         if prefix:
             await ctx.send(prefix)
+        # validate via original JSON API before scraping
+        if not await self._validate_api():
+            return await ctx.send("❌ Validation via API failed; no events today.")
         await self._post_today(ctx.channel)
 
     @agsonthisday.command()
