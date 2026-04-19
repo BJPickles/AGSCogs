@@ -41,47 +41,42 @@ DEFAULT_PRE_MESSAGES: list[str] = [
     "By the Great A'Tuin 🌏, {ping}, let's turtle-walk through time!"
 ]
 
-def userday_to_pyweekday(userday: int) -> int:
-    return (userday - 1) % 7
-
-def compute_next_occurrence(
-    user_day: int,
+def compute_next_daily(
     hour: int,
     minute: int,
     now: datetime | None = None,
     tzinfo: timezone | ZoneInfo = timezone.utc,
 ) -> datetime:
+    """
+    Next occurrence strictly after 'now' of the given clock-time
+    in tzinfo (handles DST).
+    """
     if now is None:
-        now = datetime.now(tzinfo)
+        now_local = datetime.now(tzinfo)
     else:
-        now = now.astimezone(tzinfo)
-    target_wd = userday_to_pyweekday(user_day)
-    days_ahead = (target_wd - now.weekday()) % 7
-    candidate = datetime(
-        now.year, now.month, now.day, hour, minute, tzinfo=tzinfo
-    ) + timedelta(days=days_ahead)
-    if candidate <= now:
-        candidate += timedelta(days=7)
+        now_local = now.astimezone(tzinfo)
+    candidate = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= now_local:
+        candidate += timedelta(days=1)
     return candidate
 
-def compute_last_occurrence(
-    user_day: int,
+def compute_last_daily(
     hour: int,
     minute: int,
     now: datetime | None = None,
     tzinfo: timezone | ZoneInfo = timezone.utc,
 ) -> datetime:
+    """
+    Most recent occurrence at or before 'now' of the given clock-time
+    in tzinfo (handles DST).
+    """
     if now is None:
-        now = datetime.now(tzinfo)
+        now_local = datetime.now(tzinfo)
     else:
-        now = now.astimezone(tzinfo)
-    target_wd = userday_to_pyweekday(user_day)
-    days_ago = (now.weekday() - target_wd) % 7
-    candidate = datetime(
-        now.year, now.month, now.day, hour, minute, tzinfo=tzinfo
-    ) - timedelta(days=days_ago)
-    if candidate > now:
-        candidate -= timedelta(days=7)
+        now_local = now.astimezone(tzinfo)
+    candidate = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate > now_local:
+        candidate -= timedelta(days=1)
     return candidate
 
 async def mod_check(ctx: commands.Context) -> bool:
@@ -183,9 +178,9 @@ class AGSOnThisDay(commands.Cog):
         ph = int(cfg.get("post_hour", 8))
         pm = int(cfg.get("post_minute", 0))
 
-        last_local = compute_last_occurrence(1, ph, pm, now=now_utc, tzinfo=tz)
+        last_local = compute_last_daily(ph, pm, now=now_utc, tzinfo=tz)
         last_utc = last_local.astimezone(timezone.utc)
-        next_local = compute_next_occurrence(1, ph, pm, now=now_utc, tzinfo=tz)
+        next_local = compute_next_daily(ph, pm, now=now_utc, tzinfo=tz)
         next_utc = next_local.astimezone(timezone.utc)
 
         last_posted = int(cfg.get("last_posted_unix", 0))
@@ -246,7 +241,10 @@ class AGSOnThisDay(commands.Cog):
             href = a.get("href")
             label = a.text_content().strip() or href
             wiki[label] = href
-        imgs = sec.xpath(".//img[not(contains(@src,'.svg'))]/@data-src | .//img[not(contains(@src,'.svg'))]/@src")
+        imgs = sec.xpath(
+            ".//img[not(contains(@src,'.svg'))]/@data-src | "
+            ".//img[not(contains(@src,'.svg'))]/@src"
+        )
         image_url = imgs[-1] if imgs else None
         return description, image_url, wiki
 
@@ -272,7 +270,10 @@ class AGSOnThisDay(commands.Cog):
                 label = a.text_content().strip() or href
                 wiki[label] = href
         description = "\n".join(lines)
-        imgs = sec.xpath(".//img[not(contains(@src,'.svg'))]/@data-src | .//img[not(contains(@src,'.svg'))]/@src")
+        imgs = sec.xpath(
+            ".//img[not(contains(@src,'.svg'))]/@data-src | "
+            ".//img[not(contains(@src,'.svg'))]/@src"
+        )
         image_url = imgs[-1] if imgs else None
         return description, image_url, wiki
 
@@ -425,7 +426,7 @@ class AGSOnThisDay(commands.Cog):
         except Exception:
             tz = timezone.utc
 
-        next_local = compute_next_occurrence(1, ph, pm, tzinfo=tz)
+        next_local = compute_next_daily(ph, pm, tzinfo=tz)
         role = ctx.guild.get_role(role_id) if role_id else None
 
         embed = discord.Embed(title="AGS OnThisDay Status", color=discord.Color.blurple())
