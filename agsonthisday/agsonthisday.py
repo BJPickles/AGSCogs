@@ -392,7 +392,7 @@ class AGSOnThisDay(commands.Cog):
         except Exception:
             self.bot.logger.exception("Failed to build FUN FACT section")
 
-        async def _post_featured_article(self, tree, channel):
+    async def _post_featured_article(self, tree, channel):
         try:
             # grab the first Featured‐Article section/div
             node = tree.xpath(
