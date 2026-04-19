@@ -392,8 +392,9 @@ class AGSOnThisDay(commands.Cog):
         except Exception:
             self.bot.logger.exception("Failed to build FUN FACT section")
 
-    async def _post_featured_article(self, tree, channel):
+        async def _post_featured_article(self, tree, channel):
         try:
+            # grab the first Featured‐Article section/div
             node = tree.xpath(
                 "(//section[contains(@class,'featured-article')]"
                 " | //div[contains(@class,'featured-article')])[1]"
@@ -401,22 +402,51 @@ class AGSOnThisDay(commands.Cog):
             if not node:
                 return
             art = node[0]
-            paras = art.xpath(".//p")
-            description = "\n\n".join(
-                p.text_content().strip() for p in paras if p.text_content().strip()
-            )[:4096]
-            if not description:
-                return
+
+            # 1) find the <p class="linked_text"> which holds both text + date
+            p = art.xpath(".//p[contains(@class,'linked_text')]")
+            if p:
+                p = p[0]
+                full = p.xpath("string()").strip()
+
+                # 2) pull out the date from <span class="linked_date">
+                date_node = p.xpath(".//span[contains(@class,'linked_date')]/text()")
+                date_text = date_node[0].strip() if date_node else None
+
+                # 3) strip that trailing date off the full text
+                if date_text and full.endswith(date_text):
+                    desc_text = full[: -len(date_text)].rstrip()
+                else:
+                    desc_text = full
+            else:
+                # fallback: just join all <p>
+                paras = art.xpath(".//p")
+                parts = [x.text_content().strip() for x in paras if x.text_content().strip()]
+                if not parts:
+                    return
+                desc_text = "\n\n".join(parts)
+                date_text = None
+
+            # 4) build final description + 📅 date
+            if date_text:
+                # leave a little headroom so we don’t overflow the 4096 limit
+                desc = f"{desc_text[:3900]}\n\n📅 {date_text}"
+            else:
+                desc = desc_text[:4096]
+
+            # 5) image + wiki links as before
             image = self._extract_best_image(art)
             wiki = self._extract_wiki_links(art)
+
             embed, view = self._build_embed(
                 "FEATURED ARTICLE",
-                description,
+                desc,
                 THUMBNAILS["featured-article"],
                 image,
                 wiki,
             )
             await channel.send(embed=embed, view=view)
+
         except Exception:
             self.bot.logger.exception("Failed to build FEATURED ARTICLE section")
 
