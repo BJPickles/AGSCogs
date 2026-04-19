@@ -55,7 +55,7 @@ def compute_next_occurrence(
         now = datetime.now(tzinfo)
     else:
         now = now.astimezone(tzinfo)
-    target_wd = userday_to_pyweekday(userday)
+    target_wd = userday_to_pyweekday(user_day)
     days_ahead = (target_wd - now.weekday()) % 7
     candidate = datetime(
         now.year, now.month, now.day, hour, minute, tzinfo=tzinfo
@@ -75,7 +75,7 @@ def compute_last_occurrence(
         now = datetime.now(tzinfo)
     else:
         now = now.astimezone(tzinfo)
-    target_wd = userday_to_pyweekday(userday)
+    target_wd = userday_to_pyweekday(user_day)
     days_ago = (now.weekday() - target_wd) % 7
     candidate = datetime(
         now.year, now.month, now.day, hour, minute, tzinfo=tzinfo
