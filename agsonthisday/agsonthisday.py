@@ -39,7 +39,7 @@ THUMBNAILS = {
     "featured-article":  "https://aegisgamestudios.co.uk/wp-content/uploads/2026/04/article.png",
 }
 
-# Pre‐messages
+# Pre-messages
 DEFAULT_PRE_MESSAGES: list[str] = [
     "Caw caw 🐦, did you hear that {ping}? It's the sound of Wild History™!",
     "Grab your towel 🛸, {ping}! We're hitch-hiking through yesterday's headlines!",
@@ -54,6 +54,7 @@ DEFAULT_PRE_MESSAGES: list[str] = [
     "Hear the hamster wheel 🐹, {ping}? That's the chronicle hamster running!",
     "By the Great A'Tuin 🌏, {ping}, let's turtle-walk through time!"
 ]
+
 
 def compute_next_daily(
     hour: int,
@@ -70,6 +71,7 @@ def compute_next_daily(
         candidate += timedelta(days=1)
     return candidate
 
+
 def compute_last_daily(
     hour: int,
     minute: int,
@@ -85,8 +87,10 @@ def compute_last_daily(
         candidate -= timedelta(days=1)
     return candidate
 
+
 async def mod_check(ctx: commands.Context) -> bool:
     return ctx.author.guild_permissions.manage_guild
+
 
 class ButtonView(discord.ui.View):
     """A View of URL buttons for Wikipedia links."""
@@ -95,6 +99,7 @@ class ButtonView(discord.ui.View):
         for label, url in buttons.items():
             safe_label = label if len(label) < 80 else label[:77] + "..."
             self.add_item(discord.ui.Button(label=safe_label, url=url))
+
 
 class AGSOnThisDay(commands.Cog):
     """Automatic daily 'On This Day' posts from onthisday.com."""
@@ -327,69 +332,67 @@ class AGSOnThisDay(commands.Cog):
                 self.bot.logger.warning("OnThisDay: no li.event found")
                 return
 
-            # Extract year from the event
+            # extract the year
             year_nodes = chosen.xpath(".//a[contains(@class,'date')]/text()")
             year = year_nodes[0].strip() if year_nodes else None
 
-            # Extract full text and strip the leading year if present
-            full_text = chosen.xpath("string()").strip()
-            desc_text = full_text
-            if year and full_text.startswith(year):
-                desc_text = full_text[len(year):].strip()
+            # pull out the full text, strip leading year if present
+            desc = chosen.xpath("string()").strip()
+            if year and desc.startswith(year):
+                desc = desc[len(year):].strip()
 
-            # Build today's date + the event year
-            today = datetime.now().date()
-            month_name = today.strftime("%B")
-            day = today.day
+            # now append the year at the bottom with 📅
             if year:
-                date_text = f"{month_name} {day}, {year}"
-            else:
-                date_text = f"{month_name} {day}"
-
-            # Append calendar emoji and formatted date
-            final_desc = f"{desc_text}\n\n📅 {date_text}"
+                desc = f"{desc}\n\n📅 {year}"
 
             image = self._extract_best_image(chosen)
-            wiki = self._extract_wiki_links(chosen)
+            wiki  = self._extract_wiki_links(chosen)
 
             embed, view = self._build_embed(
                 "TODAY IN HISTORY",
-                final_desc[:4096],
+                desc[:4096],
                 THUMBNAILS["events"],
                 image,
                 wiki,
             )
             await channel.send(embed=embed, view=view)
+
         except Exception:
             self.bot.logger.exception("Failed to build TODAY IN HISTORY section")
 
+
     async def _post_fun_fact(self, tree, channel):
         try:
-            section = tree.xpath("//section[contains(@class,'section--did-you-know')]")
-            if not section:
-                self.bot.logger.debug("OnThisDay: no did-you-know section")
-                return
-            sec = section[0]
+            # grab every wrapper (covers both DID YOU KNOW and FUN FACT)
+            wrappers = tree.xpath("//div[contains(@class,'wrapper')]")
 
-            # Loop over each wrapper (Fun Fact or Did You Know)
-            wrappers = sec.xpath(".//div[contains(@class,'wrapper')]")
-            for wrapper in wrappers:
-                # Extract the heading/title
-                h2_nodes = wrapper.xpath(".//h2[contains(@class,'did-you-know__heading')]")
-                if not h2_nodes:
+            for wrap in wrappers:
+                # 1) get the <h2> title
+                h2 = wrap.xpath(".//h2")
+                if not h2:
                     continue
-                title = h2_nodes[0].text_content().strip()
+                # clean up whitespace
+                title = re.sub(r"\s+", " ", h2[0].text_content()).strip()
 
-                # Extract paragraphs: the fact text vs. the date line
-                paras = wrapper.xpath(".//p")
+                # 2) choose thumbnail by title content
+                key = title.lower()
+                if "did you know" in key:
+                    thumb = THUMBNAILS["did-you-know"]
+                elif "fun fact" in key:
+                    thumb = THUMBNAILS["fun-fact"]
+                else:
+                    continue  # skip any other wrapper
+
+                # 3) extract the paragraphs: main text vs date line
+                paras = wrap.xpath(".//p")
                 fact_text = None
                 fact_date = None
                 for p in paras:
-                    cls = p.get("class", "").strip()
                     txt = p.text_content().strip()
                     if not txt:
                         continue
-                    if "fun-fact" in cls:
+                    # the date line carries class="fun-fact"
+                    if "fun-fact" in (p.get("class") or ""):
                         fact_date = txt
                     else:
                         fact_text = txt
@@ -397,17 +400,16 @@ class AGSOnThisDay(commands.Cog):
                 if not fact_text:
                     continue
 
+                # 4) build description
                 desc = fact_text
                 if fact_date:
                     desc += f"\n\n📅 {fact_date}"
 
-                # Pick thumbnail based on whether it's a Fun Fact or Did You Know
-                key = "fun-fact" if "fun fact" in title.lower() else "did-you-know"
-                thumb = THUMBNAILS.get(key)
+                # 5) image & wiki
+                image = self._extract_best_image(wrap)
+                wiki  = self._extract_wiki_links(wrap)
 
-                image = self._extract_best_image(wrapper)
-                wiki = self._extract_wiki_links(wrapper)
-
+                # 6) build & send
                 embed, view = self._build_embed(
                     title,
                     desc[:4096],
@@ -416,8 +418,10 @@ class AGSOnThisDay(commands.Cog):
                     wiki,
                 )
                 await channel.send(embed=embed, view=view)
+
         except Exception:
-            self.bot.logger.exception("Failed to build FUN FACT / DID YOU KNOW section")
+            self.bot.logger.exception("Failed to build DID YOU KNOW / FUN FACT sections")
+
 
     async def _post_featured_article(self, tree, channel):
         try:
@@ -453,7 +457,7 @@ class AGSOnThisDay(commands.Cog):
                 desc = desc_text[:4096]
 
             image = self._extract_best_image(art)
-            wiki = self._extract_wiki_links(art)
+            wiki  = self._extract_wiki_links(art)
 
             embed, view = self._build_embed(
                 "FEATURED ARTICLE",
@@ -466,6 +470,7 @@ class AGSOnThisDay(commands.Cog):
 
         except Exception:
             self.bot.logger.exception("Failed to build FEATURED ARTICLE section")
+
 
     async def _get_next_prefix(self, guild: discord.Guild, data: dict | None = None) -> str:
         if data is None:
@@ -493,11 +498,13 @@ class AGSOnThisDay(commands.Cog):
             return tmpl.format(ping="")
         return tmpl.format(ping=role.mention)
 
+
     @commands.group(name="agsonthisday", invoke_without_command=True)
     @commands.guild_only()
     async def agsonthisday(self, ctx: commands.Context) -> None:
         """Configure or view your AGS On This Day daily posts."""
         await ctx.send_help(ctx.command)
+
 
     @agsonthisday.command()
     @commands.check(mod_check)
@@ -507,6 +514,7 @@ class AGSOnThisDay(commands.Cog):
         await self.config.guild(ctx.guild).last_posted_unix.set(0)
         await ctx.send("✅ AGS OnThisDay enabled.")
 
+
     @agsonthisday.command()
     @commands.check(mod_check)
     async def disable(self, ctx: commands.Context) -> None:
@@ -514,12 +522,14 @@ class AGSOnThisDay(commands.Cog):
         await self.config.guild(ctx.guild).enabled.set(False)
         await ctx.send("❌ AGS OnThisDay disabled.")
 
+
     @agsonthisday.command()
     @commands.check(mod_check)
     async def setchannel(self, ctx: commands.Context, channel: discord.TextChannel) -> None:
         """Set the channel for the daily post."""
         await self.config.guild(ctx.guild).channel_id.set(channel.id)
         await ctx.send(f"✅ Channel set to {channel.mention}.")
+
 
     @agsonthisday.command()
     @commands.check(mod_check)
@@ -536,6 +546,7 @@ class AGSOnThisDay(commands.Cog):
         await self.config.guild(ctx.guild).last_posted_unix.set(0)
         await ctx.send(f"✅ Post time set to {hr:02d}:{mn:02d}.")
 
+
     @agsonthisday.command()
     @commands.check(mod_check)
     async def settimezone(self, ctx: commands.Context, tz_name: str) -> None:
@@ -548,12 +559,14 @@ class AGSOnThisDay(commands.Cog):
         await self.config.guild(ctx.guild).last_posted_unix.set(0)
         await ctx.send(f"✅ Timezone set to `{tz_name}`.")
 
+
     @agsonthisday.command()
     @commands.check(mod_check)
     async def setpingrole(self, ctx: commands.Context, role: discord.Role) -> None:
         """Set the role to ping with the daily pre-message."""
         await self.config.guild(ctx.guild).ping_role_id.set(role.id)
         await ctx.send(f"✅ Ping role set to {role.mention}.")
+
 
     @agsonthisday.command()
     @commands.check(mod_check)
@@ -563,6 +576,7 @@ class AGSOnThisDay(commands.Cog):
         if prefix:
             await ctx.send(prefix)
         await self._post_today(ctx.channel)
+
 
     @agsonthisday.command()
     @commands.check(mod_check)
@@ -603,12 +617,14 @@ class AGSOnThisDay(commands.Cog):
         embed.add_field(name="Ping Role", value=(role.mention if role else "Not set"), inline=True)
         await ctx.send(embed=embed)
 
+
     @commands.is_owner()
     @agsonthisday.command(name="raw")
     async def _raw_config(self, ctx: commands.Context) -> None:
         """[Owner only] Dump raw guild config."""
         data = await self.config.all_guilds()
         await ctx.send(box(str(data)))
+
 
 async def setup(bot: Red) -> None:
     """Load the AGSOnThisDay cog."""
