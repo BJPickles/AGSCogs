@@ -315,7 +315,6 @@ class AGSOnThisDay(commands.Cog):
         into 'D Month YYYY' (e.g. '24 April 1479').
         If parsing fails, return raw_date unchanged.
         """
-        # Strip ordinal suffixes (st, nd, rd, th)
         s = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', raw_date, flags=re.IGNORECASE).strip()
         month_map = {
             "jan": 1, "feb": 2, "mar": 3, "apr": 4,
@@ -340,11 +339,21 @@ class AGSOnThisDay(commands.Cog):
                 continue
             try:
                 dt = datetime(int(year_str), month, int(day_str))
-                # Day without leading zero if <10
                 return f"{dt.day} {dt.strftime('%B')} {dt.year}"
             except Exception:
                 continue
         return raw_date
+
+    def _annotate_years_ago(self, date_str: str) -> str:
+        """
+        If date_str ends in a 4-digit year, append " (that's X years ago!)".
+        """
+        m = re.search(r'(\d{4})$', date_str)
+        if not m:
+            return date_str
+        year = int(m.group(1))
+        years = datetime.now().year - year
+        return f"{date_str} (that's {years} years ago!)"
 
     # ────────────────────────────────────────────────────────
     #  Dispatch to three isolated scrapers
@@ -372,25 +381,23 @@ class AGSOnThisDay(commands.Cog):
                 self.bot.logger.warning("OnThisDay: no li.event found")
                 return
 
-            # extract the year
             year_nodes = chosen.xpath(".//a[contains(@class,'date')]/text()")
             year = year_nodes[0].strip() if year_nodes else None
 
-            # pull out full text, strip leading year if present
             desc = chosen.xpath("string()").strip()
             if year and desc.startswith(year):
                 desc = desc[len(year):].strip()
 
-            # now append the full date (e.g. "16 April 1479") at bottom
             if year:
                 try:
                     yr_int = int(year)
                     today = datetime.now()
                     month_name = today.strftime("%B")
                     day = today.day
-                    date_str = f"{day} {month_name} {yr_int}"
+                    base = f"{day} {month_name} {yr_int}"
                 except Exception:
-                    date_str = year
+                    base = year
+                date_str = self._annotate_years_ago(base)
                 desc = f"{desc}\n\n📅 {date_str}"
 
             image = self._extract_best_image(chosen)
@@ -442,8 +449,9 @@ class AGSOnThisDay(commands.Cog):
 
                 desc = fact_text
                 if fact_date:
-                    formatted = self._standardize_date(fact_date)
-                    desc += f"\n\n📅 {formatted}"
+                    std = self._standardize_date(fact_date)
+                    annotated = self._annotate_years_ago(std)
+                    desc += f"\n\n📅 {annotated}"
 
                 image = self._extract_best_image(wrap)
                 wiki  = self._extract_wiki_links(wrap)
@@ -490,8 +498,9 @@ class AGSOnThisDay(commands.Cog):
                 date_text = None
 
             if date_text:
-                formatted = self._standardize_date(date_text)
-                desc = f"{desc_text[:3900]}\n\n📅 {formatted}"
+                std = self._standardize_date(date_text)
+                annotated = self._annotate_years_ago(std)
+                desc = f"{desc_text[:3900]}\n\n📅 {annotated}"
             else:
                 desc = desc_text[:4096]
 
