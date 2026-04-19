@@ -45,13 +45,13 @@ THUMBNAILS = {
 # Pre-messages
 DEFAULT_PRE_MESSAGES: list[str] = [
     "Caw caw 🐦, did you hear that {ping}? It's the sound of Wild History™!",
-    "Grab your towel 🛸, {ping}! We're hitch-hiking through yesterday's headlines!",
+    "Grab your towel 🛸, {ping}! We're hitch-hiking through the headlines of today (but from the past)!",
     "Spanners at the ready 🔧, {ping}! Time to wrench open past mysteries!",
     "By the Librarian's tusks 🐘, {ping}, today's history is positively bananas!",
     "Sound the klaxon 🚨, {ping}! A history emergency has arrived!",
     "Ahoy mateys ⚓, {ping}! A tide of bygone tales washes ashore!",
     "Don your top hat 🎩, {ping}! A historical caper awaits!",
-    "To the time machine 🕰️, {ping}! We're off to yesterday!",
+    "To the time machine 🕰️, {ping}! We're off on an adventure!",
     "Tea kettle's whistling 🍵, {ping}! History's brewing something grand!",
     "Blast off 🚀, {ping}! Prepare for a cosmic history tour!",
     "Hear the hamster wheel 🐹, {ping}? That's the chronicle hamster running!",
@@ -309,51 +309,54 @@ class AGSOnThisDay(commands.Cog):
         view = ButtonView(dict(items)) if items else None
         return embed, view
 
-    def _standardize_date(self, raw_date: str) -> str:
-        """
-        Convert raw_date like '24 April 1479' or 'April 24, 1479'
-        into 'D Month YYYY' (e.g. '24 April 1479').
-        If parsing fails, return raw_date unchanged.
-        """
-        s = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', raw_date, flags=re.IGNORECASE).strip()
-        month_map = {
-            "jan": 1, "feb": 2, "mar": 3, "apr": 4,
-            "may": 5, "jun": 6, "jul": 7, "aug": 8,
-            "sep": 9, "oct": 10, "nov": 11, "dec": 12
-        }
-        patterns = [
-            (r'^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$', "DMY"),
-            (r'^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$', "MDY"),
-        ]
-        for pat, typ in patterns:
-            m = re.match(pat, s)
-            if not m:
-                continue
-            if typ == "DMY":
-                day_str, month_name, year_str = m.group(1), m.group(2), m.group(3)
-            else:
-                month_name, day_str, year_str = m.group(1), m.group(2), m.group(3)
-            key = month_name.lower()[:3]
-            month = month_map.get(key)
-            if not month:
-                continue
-            try:
-                dt = datetime(int(year_str), month, int(day_str))
-                return f"{dt.day} {dt.strftime('%B')} {dt.year}"
-            except Exception:
-                continue
-        return raw_date
+    def _standardize_date(self, raw: str) -> str:
+      # strip ordinal suffixes
+      s = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', raw, flags=re.IGNORECASE).strip()
+      # try to pull out day, month, year, optional era
+      m = re.match(
+        r'^(\d{1,2})\s+([A-Za-z]+)\s+(\d{1,4})(?:\s*(BC|BCE|AD|CE))?$',
+        s,
+        flags=re.IGNORECASE
+      )
+      if not m:
+          return raw
+      day, month_name, year_str, era = m.groups()
+      month_map = {
+        "jan":1,"feb":2,"mar":3,"apr":4,
+        "may":5,"jun":6,"jul":7,"aug":8,
+        "sep":9,"oct":10,"nov":11,"dec":12
+      }
+      key = month_name.lower()[:3]
+      month = month_map.get(key)
+      if not month:
+          return raw
+      day_i = int(day)
+      year_i = int(year_str)
+      # for AD or no suffix we can round-trip through datetime
+      if era is None or era.upper() in ("AD","CE"):
+          try:
+              dt = datetime(year_i, month, day_i)
+              return f"{dt.day} {dt.strftime('%B')} {dt.year}"
+          except ValueError:
+              return raw
+      # BC era: just reassemble without hitting datetime (year must be ≥1)
+      return f"{day_i} {month_name.capitalize()} {year_i} BC"
 
     def _annotate_years_ago(self, date_str: str) -> str:
-        """
-        If date_str ends in a 4-digit year, append " (that's X years ago!)".
-        """
-        m = re.search(r'(\d{4})$', date_str)
-        if not m:
-            return date_str
-        year = int(m.group(1))
-        years = datetime.now().year - year
-        return f"{date_str} (that's {years} years ago!)"
+      # look for a trailing year with optional era suffix
+      m = re.search(r'(\d{1,4})(?:\s*(BC|BCE|AD|CE))?$', date_str, flags=re.IGNORECASE)
+      if not m:
+          return date_str
+      year_i = int(m.group(1))
+      era = (m.group(2) or "").upper()
+      now = datetime.now()
+      if era in ("BC","BCE"):
+          # e.g. 44 BC is (now.year + 44) years ago
+          years_ago = now.year + year_i
+      else:
+          # AD / CE / none
+          years_ago = now.year - year_i
+      return f"{date_str} (that's {years_ago} years ago!)"
 
     # ────────────────────────────────────────────────────────
     #  Dispatch to three isolated scrapers
