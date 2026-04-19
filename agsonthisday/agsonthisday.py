@@ -18,6 +18,14 @@ from redbot.core.utils import get_end_user_data_statement
 __red_end_user_data_statement__ = get_end_user_data_statement(__file__)
 
 TODAY_URL = "https://www.onthisday.com/today"
+ENDPOINT  = "https://byabbe.se/on-this-day/{}/events.json"
+
+# mimic a real browser UA so onthisday.com will respond
+DEFAULT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/115.0.0 Safari/537.36"
+)
 
 SECTION_ICONS: dict[str, str] = {
     "Today in History":      "https://www.onthisday.com/images/calendar.svg",
@@ -119,18 +127,15 @@ class AGSOnThisDay(commands.Cog):
 
     def format_help_for_context(self, ctx: commands.Context) -> str:
         help_text = super().format_help_for_context(ctx)
-        return (
-            f"{help_text}\n\n"
-            f"Author: {self.__author__}\n"
-            f"Version: {self.__version__}"
-        )
+        return f"{help_text}\n\nAuthor: {self.__author__}\nVersion: {self.__version__}"
 
     async def red_delete_data_for_user(self, **kwargs):
         """No per-user data stored."""
         return
 
     async def cog_load(self) -> None:
-        self.session = aiohttp.ClientSession()
+        # supply a browser UA so onthisday.com returns full content
+        self.session = aiohttp.ClientSession(headers={"User-Agent": DEFAULT_UA})
         self._task = self.bot.loop.create_task(self._background_loop())
 
     async def cog_unload(self) -> None:
@@ -203,22 +208,40 @@ class AGSOnThisDay(commands.Cog):
                                 await channel.send(prefix)
                             except Exception:
                                 pass
-                        # send all sections
-                        await self._post_today(channel)
+                        # validate via original API before scraping
+                        if not await self._validate_api():
+                            await channel.send("❌ Validation via API failed; no events today.")
+                        else:
+                            await self._post_today(channel)
                         await self.config.guild(guild).last_posted_unix.set(post_ts)
+
+    async def _validate_api(self) -> bool:
+        """Hit the original JSON API to ensure events exist for today's date."""
+        if not self.session:
+            return False
+        now = datetime.now()
+        month = now.month
+        day   = now.day
+        try:
+            async with self.session.get(ENDPOINT.format(f"{month}/{day}")) as resp:
+                if resp.status != 200:
+                    return False
+                data = await resp.json()
+        except Exception:
+            return False
+        return bool(data.get("events"))
 
     async def _fetch_page(self) -> html.HtmlElement | None:
         if not self.session:
             return None
         try:
             async with self.session.get(TODAY_URL, timeout=20) as resp:
-                if resp.status != 200:
-                    return None
-                text = await resp.text()
+                resp.raise_for_status()
+                raw = await resp.read()
         except Exception:
             return None
         try:
-            return html.fromstring(text)
+            return html.fromstring(raw)
         except Exception:
             return None
 
