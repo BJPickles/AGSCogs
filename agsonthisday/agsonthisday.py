@@ -418,20 +418,29 @@ class AGSOnThisDay(commands.Cog):
 
     async def _post_fun_fact(self, tree, channel):
         try:
+            # grab every wrapper (covers both DID YOU KNOW and FUN FACT)
             wrappers = tree.xpath("//div[contains(@class,'wrapper')]")
+
             for wrap in wrappers:
+                # 1) get the <h2> title
                 h2 = wrap.xpath(".//h2")
                 if not h2:
                     continue
+                # clean up whitespace
                 title = re.sub(r"\s+", " ", h2[0].text_content()).strip()
+                # force uppercase so it matches the others
+                title = title.upper()
+
+                # 2) choose thumbnail by title content
                 key = title.lower()
                 if "did you know" in key:
                     thumb = THUMBNAILS["did-you-know"]
                 elif "fun fact" in key:
                     thumb = THUMBNAILS["fun-fact"]
                 else:
-                    continue
+                    continue  # skip any other wrapper
 
+                # 3) extract the paragraphs: main text vs date line
                 paras = wrap.xpath(".//p")
                 fact_text = None
                 fact_date = None
@@ -439,6 +448,7 @@ class AGSOnThisDay(commands.Cog):
                     txt = p.text_content().strip()
                     if not txt:
                         continue
+                    # the date line carries class="fun-fact"
                     if "fun-fact" in (p.get("class") or ""):
                         fact_date = txt
                     else:
@@ -447,15 +457,18 @@ class AGSOnThisDay(commands.Cog):
                 if not fact_text:
                     continue
 
+                # 4) build description
                 desc = fact_text
                 if fact_date:
                     std = self._standardize_date(fact_date)
                     annotated = self._annotate_years_ago(std)
                     desc += f"\n\n📅 {annotated}"
 
+                # 5) image & wiki
                 image = self._extract_best_image(wrap)
                 wiki  = self._extract_wiki_links(wrap)
 
+                # 6) build & send
                 embed, view = self._build_embed(
                     title,
                     desc[:4096],
