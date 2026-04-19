@@ -27,15 +27,14 @@ DEFAULT_UA = (
     "Chrome/115.0.0 Safari/537.36"
 )
 
-# icons keyed by lowercase search key
-ICONS: dict[str, str] = {
-    "events":            "https://www.onthisday.com/images/calendar.svg",
-    "did you know":      "https://www.onthisday.com/images/did-you-know.svg",
-    "fun fact":          "https://www.onthisday.com/images/comedian.svg",
-    "featured article":  "https://www.onthisday.com/images/article.svg",
+# PNG thumbnails for each section
+THUMBNAILS = {
+    "events":            "https://aegisgamestudios.co.uk/wp-content/uploads/2026/04/person-of-interest.png",
+    "did-you-know":      "https://aegisgamestudios.co.uk/wp-content/uploads/2026/04/did-you-know.png",
+    "fun-fact":          "https://aegisgamestudios.co.uk/wp-content/uploads/2026/04/comedian.png",
+    "featured-article":  "https://aegisgamestudios.co.uk/wp-content/uploads/2026/04/article.png",
 }
 
-# 12 over‐the‐top punny pre‐messages
 DEFAULT_PRE_MESSAGES: list[str] = [
     "Caw caw 🐦, did you hear that {ping}? It's the sound of Wild History™!",
     "Grab your towel 🛸, {ping}! We're hitch-hiking through yesterday's headlines!",
@@ -57,10 +56,6 @@ def compute_next_daily(
     now: datetime | None = None,
     tzinfo: timezone | ZoneInfo = timezone.utc,
 ) -> datetime:
-    """
-    Next occurrence strictly after 'now' of the given clock-time
-    in tzinfo (handles DST).
-    """
     if now is None:
         now_local = datetime.now(tzinfo)
     else:
@@ -76,10 +71,6 @@ def compute_last_daily(
     now: datetime | None = None,
     tzinfo: timezone | ZoneInfo = timezone.utc,
 ) -> datetime:
-    """
-    Most recent occurrence at or before 'now' of the given clock-time
-    in tzinfo (handles DST).
-    """
     if now is None:
         now_local = datetime.now(tzinfo)
     else:
@@ -104,7 +95,7 @@ class AGSOnThisDay(commands.Cog):
     """Automatic daily 'On This Day' posts from onthisday.com."""
 
     __author__ = "AEGIS Team"
-    __version__ = "1.1.1"
+    __version__ = "1.1.2"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -136,7 +127,7 @@ class AGSOnThisDay(commands.Cog):
         return
 
     async def cog_load(self) -> None:
-        # Use browser UA so onthisday.com returns full HTML
+        # Use a browser UA so onthisday.com returns full HTML
         self.session = aiohttp.ClientSession(headers={"User-Agent": DEFAULT_UA})
         self._task = self.bot.loop.create_task(self._background_loop())
 
@@ -157,12 +148,12 @@ class AGSOnThisDay(commands.Cog):
                     try:
                         await self._handle_guild(guild, now_utc)
                     except Exception:
-                        self.bot.logger.exception("AGSOnThisDay error in %s", guild.id)
+                        self.bot.logger.exception("AGSOnThisDay error in guild %s", guild.id)
                 await asyncio.sleep(30)
             except asyncio.CancelledError:
                 break
             except Exception:
-                self.bot.logger.exception("BG loop crashed")
+                self.bot.logger.exception("AGSOnThisDay background loop crashed")
                 await asyncio.sleep(30)
 
     async def _handle_guild(self, guild: discord.Guild, now_utc: datetime) -> None:
@@ -210,26 +201,23 @@ class AGSOnThisDay(commands.Cog):
                                 await channel.send(prefix)
                             except Exception:
                                 pass
-                        # verify via JSON API
-                        if not await self._validate_api():
-                            await channel.send("❌ No historic events found via API.")
-                        else:
-                            await self._post_today(channel)
+                        # now post the four sections
+                        await self._post_today(channel)
                         await self.config.guild(guild).last_posted_unix.set(post_ts)
 
-    async def _validate_api(self) -> bool:
-        """Ensure there are events for today's date via the JSON API."""
+    async def _fetch_json_events(self) -> list[dict]:
+        """Fetch today's events JSON (byabbe.se) and filter year>0."""
         if not self.session:
-            return False
+            return []
         now = datetime.now()
         try:
             async with self.session.get(ENDPOINT.format(f"{now.month}/{now.day}")) as r:
                 if r.status != 200:
-                    return False
+                    return []
                 data = await r.json()
         except Exception:
-            return False
-        return bool(data.get("events"))
+            return []
+        return [e for e in data.get("events", []) if e.get("year", "").lstrip("-").isdigit()]
 
     async def _fetch_page(self) -> html.HtmlElement | None:
         if not self.session:
@@ -245,96 +233,69 @@ class AGSOnThisDay(commands.Cog):
         except Exception:
             return None
 
-    def _parse_events(
-        self, tree: html.HtmlElement, key: str
-    ) -> tuple[str, str | None, dict[str, str]] | None:
-        # case-insensitive match for <h2>Events</h2>
-        lower = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        upper = "abcdefghijklmnopqrstuvwxyz"
-        hdr = tree.xpath(
-            f"//h2[contains(translate(normalize-space(),'{lower}','{upper}'),'{key}')]"
-        )
-        if not hdr:
-            return None
-        sec = hdr[0]
-        while sec is not None and sec.tag.lower() != "section":
-            sec = sec.getparent()
-        if sec is None:
-            return None
-        items = sec.xpath(".//ul/li")[:5]
-        lines: list[str] = []
-        wiki: dict[str, str] = {}
-        for li in items:
-            text = li.xpath("string()").strip()
-            lines.append(f"• {text}")
-            for a in li.xpath(".//a[contains(@href,'wikipedia.org')]"):
+    async def _post_today(self, channel: discord.TextChannel) -> None:
+        # 1) Today in History from JSON API
+        events = await self._fetch_json_events()
+        if events:
+            # take top 5
+            top = events[:5]
+            lines = [f"**{e['year']}**: {e['description']}" for e in top]
+            description = "\n".join(lines)
+            # gather all wiki links
+            wiki: dict[str, str] = {}
+            for e in top:
+                for w in e.get("wikipedia", []):
+                    title = w.get("title", "").strip()
+                    url = w.get("wikipedia")
+                    if title and url:
+                        wiki[title] = url
+            embed = discord.Embed(
+                title="TODAY IN HISTORY",
+                description=description,
+                color=discord.Color(0xce9dc6),
+            )
+            embed.set_thumbnail(url=THUMBNAILS["events"])
+            embed.set_footer(text="from onthisday.com")
+            view = ButtonView(wiki) if wiki else None
+            try:
+                await channel.send(embed=embed, view=view)
+            except Exception:
+                await channel.send(embed=embed)
+
+        # 2–4) Did You Know, Fun Fact, Featured Article from HTML
+        tree = await self._fetch_page()
+        if not tree:
+            return
+
+        sections = [
+            ("section--did-you-know",     "DID YOU KNOW?",        THUMBNAILS["did-you-know"]),
+            ("section--fun-fact",         "FUN FACT ABOUT TODAY", THUMBNAILS["fun-fact"]),
+            ("section--featured-article", "FEATURED ARTICLE",     THUMBNAILS["featured-article"]),
+        ]
+        for cls, title, thumb in sections:
+            sec = tree.xpath(f"//section[contains(@class,'{cls}')]")
+            if not sec:
+                continue
+            sec = sec[0]
+            paras = sec.xpath(".//p")
+            descs = [p.text_content().strip() for p in paras if p.text_content().strip()]
+            description = "\n\n".join(descs)[:4096]
+            # find bottom image if any
+            imgs = sec.xpath(".//img[@src and not(contains(@src,'.svg'))]/@src | .//img[@data-src and not(contains(@data-src,'.svg'))]/@data-src")
+            image_url = imgs[-1] if imgs else None
+            # find any Wikipedia links (rare)
+            wiki: dict[str, str] = {}
+            for a in sec.xpath(".//a[contains(@href,'wikipedia.org')]"):
                 href = a.get("href")
                 label = a.text_content().strip() or href
                 wiki[label] = href
-        description = "\n".join(lines)
-        imgs = sec.xpath(
-            ".//img[not(contains(@src,'.svg'))]/@data-src | "
-            ".//img[not(contains(@src,'.svg'))]/@src"
-        )
-        image_url = imgs[-1] if imgs else None
-        return description, image_url, wiki
 
-    def _parse_section(
-        self, tree: html.HtmlElement, key: str
-    ) -> tuple[str, str | None, dict[str, str]] | None:
-        # generic case-insensitive <h2>
-        lower = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        upper = "abcdefghijklmnopqrstuvwxyz"
-        hdr = tree.xpath(
-            f"//h2[contains(translate(normalize-space(),'{lower}','{upper}'),'{key}')]"
-        )
-        if not hdr:
-            return None
-        sec = hdr[0]
-        while sec is not None and sec.tag.lower() != "section":
-            sec = sec.getparent()
-        if sec is None:
-            return None
-        paras = sec.xpath(".//p")
-        descs = [p.text_content().strip() for p in paras if p.text_content().strip()]
-        description = "\n\n".join(descs)[:4096] or ""
-        wiki: dict[str, str] = {}
-        for a in sec.xpath(".//a[contains(@href,'wikipedia.org')]"):
-            href = a.get("href")
-            label = a.text_content().strip() or href
-            wiki[label] = href
-        imgs = sec.xpath(
-            ".//img[not(contains(@src,'.svg'))]/@data-src | "
-            ".//img[not(contains(@src,'.svg'))]/@src"
-        )
-        image_url = imgs[-1] if imgs else None
-        return description, image_url, wiki
-
-    async def _post_today(self, channel: discord.TextChannel) -> None:
-        tree = await self._fetch_page()
-        if tree is None:
-            await channel.send("❌ Failed to retrieve On This Day content.")
-            return
-        # key, parser, embed_title
-        sections = [
-            ("events",           self._parse_events, "TODAY IN HISTORY"),
-            ("did you know",     self._parse_section, "DID YOU KNOW?"),
-            ("fun fact",         self._parse_section, "FUN FACT ABOUT TODAY"),
-            ("featured article", self._parse_section, "FEATURED ARTICLE"),
-        ]
-        for key, parser, title in sections:
-            data = parser(tree, key)
-            if not data:
-                continue
-            description, image_url, wiki = data
-            icon = ICONS.get(key)
             embed = discord.Embed(
                 title=title,
                 description=description,
-                color=discord.Color.blurple(),
+                color=discord.Color(0xce9dc6),
             )
-            if icon:
-                embed.set_thumbnail(url=icon)
+            embed.set_thumbnail(url=thumb)
             if image_url:
                 embed.set_image(url=image_url)
             embed.set_footer(text="from onthisday.com")
@@ -375,38 +336,38 @@ class AGSOnThisDay(commands.Cog):
     @commands.group(name="agsonthisday", invoke_without_command=True)
     @commands.guild_only()
     async def agsonthisday(self, ctx: commands.Context) -> None:
-        """Configure or view AGS On This Day daily posts."""
+        """Configure or view your AGS On This Day daily posts."""
         await ctx.send_help(ctx.command)
 
     @agsonthisday.command()
     @commands.check(mod_check)
     async def enable(self, ctx: commands.Context) -> None:
-        """Enable daily posts."""
+        """Enable daily On This Day posts."""
         await self.config.guild(ctx.guild).enabled.set(True)
         await self.config.guild(ctx.guild).last_posted_unix.set(0)
-        await ctx.send("✅ Enabled AGS OnThisDay.")
+        await ctx.send("✅ AGS OnThisDay enabled.")
 
     @agsonthisday.command()
     @commands.check(mod_check)
     async def disable(self, ctx: commands.Context) -> None:
-        """Disable daily posts."""
+        """Disable daily On This Day posts."""
         await self.config.guild(ctx.guild).enabled.set(False)
-        await ctx.send("❌ Disabled AGS OnThisDay.")
+        await ctx.send("❌ AGS OnThisDay disabled.")
 
     @agsonthisday.command()
     @commands.check(mod_check)
     async def setchannel(self, ctx: commands.Context, channel: discord.TextChannel) -> None:
-        """Set target channel."""
+        """Set the channel for the daily post."""
         await self.config.guild(ctx.guild).channel_id.set(channel.id)
         await ctx.send(f"✅ Channel set to {channel.mention}.")
 
     @agsonthisday.command()
     @commands.check(mod_check)
     async def settime(self, ctx: commands.Context, time_str: str) -> None:
-        """Set daily post time (HH:MM)."""
+        """Set the local time to post each day. Format HH:MM."""
         m = re.match(r"^(\d{1,2}):(\d{2})$", time_str.strip())
         if not m:
-            return await ctx.send("❌ Use HH:MM format.")
+            return await ctx.send("❌ Time must be in HH:MM format.")
         hr, mn = int(m.group(1)), int(m.group(2))
         if not (0 <= hr < 24 and 0 <= mn < 60):
             return await ctx.send("❌ Invalid time.")
@@ -418,7 +379,7 @@ class AGSOnThisDay(commands.Cog):
     @agsonthisday.command()
     @commands.check(mod_check)
     async def settimezone(self, ctx: commands.Context, tz_name: str) -> None:
-        """Set IANA timezone (e.g. Europe/London)."""
+        """Set the IANA timezone for posts."""
         try:
             ZoneInfo(tz_name)
         except Exception:
@@ -430,7 +391,7 @@ class AGSOnThisDay(commands.Cog):
     @agsonthisday.command()
     @commands.check(mod_check)
     async def setpingrole(self, ctx: commands.Context, role: discord.Role) -> None:
-        """Set role to ping in pre-messages."""
+        """Set the role to ping with the daily pre-message."""
         await self.config.guild(ctx.guild).ping_role_id.set(role.id)
         await ctx.send(f"✅ Ping role set to {role.mention}.")
 
@@ -441,14 +402,12 @@ class AGSOnThisDay(commands.Cog):
         prefix = await self._get_next_prefix(ctx.guild)
         if prefix:
             await ctx.send(prefix)
-        if not await self._validate_api():
-            return await ctx.send("❌ No events found via API.")
         await self._post_today(ctx.channel)
 
     @agsonthisday.command()
     @commands.check(mod_check)
     async def status(self, ctx: commands.Context) -> None:
-        """Show config and next post time."""
+        """Show current configuration and next post time."""
         data = await self.config.guild(ctx.guild).all()
         enabled = data.get("enabled", False)
         ch_id = data.get("channel_id")
@@ -456,29 +415,42 @@ class AGSOnThisDay(commands.Cog):
         ph = int(data.get("post_hour", 8))
         pm = int(data.get("post_minute", 0))
         role_id = data.get("ping_role_id")
+
         try:
             tz = ZoneInfo(tz_str)
         except Exception:
             tz = timezone.utc
+
         next_local = compute_next_daily(ph, pm, tzinfo=tz)
         role = ctx.guild.get_role(role_id) if role_id else None
-        embed = discord.Embed(title="AGS OnThisDay Status", color=discord.Color.blurple())
+
+        embed = discord.Embed(title="AGS OnThisDay Status", color=discord.Color(0xce9dc6))
         embed.add_field(name="Enabled", value=str(enabled), inline=True)
         embed.add_field(
             name="Channel",
-            value=(ctx.guild.get_channel(ch_id).mention if ch_id and ctx.guild.get_channel(ch_id) else "Not set"),
+            value=ctx.guild.get_channel(ch_id).mention
+                  if ch_id and ctx.guild.get_channel(ch_id)
+                  else "Not set",
             inline=True,
         )
         embed.add_field(name="Timezone", value=tz_str, inline=True)
-        embed.add_field(name="Next Post (local)", value=f"{next_local:%Y-%m-%d %H:%M %Z}", inline=False)
-        embed.add_field(name="Next Post (t: tag)", value=f"<t:{int(next_local.timestamp())}:t> (<t:{int(next_local.timestamp())}:R>)", inline=False)
+        embed.add_field(
+            name="Next Post (local)",
+            value=f"{next_local:%Y-%m-%d %H:%M %Z}",
+            inline=False,
+        )
+        embed.add_field(
+            name="Next Post (discord t: tag)",
+            value=f"<t:{int(next_local.timestamp())}:t> (<t:{int(next_local.timestamp())}:R>)",
+            inline=False,
+        )
         embed.add_field(name="Ping Role", value=(role.mention if role else "Not set"), inline=True)
         await ctx.send(embed=embed)
 
     @commands.is_owner()
     @agsonthisday.command(name="raw")
     async def _raw_config(self, ctx: commands.Context) -> None:
-        """[Owner only] Dump raw guild config."""
+        """[Owner only] Dump the raw guild config."""
         data = await self.config.all_guilds()
         await ctx.send(box(str(data)))
 
