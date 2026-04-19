@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import asyncio
+import random
 import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -25,11 +26,23 @@ SECTION_ICONS: dict[str, str] = {
     "Featured Article":      "https://www.onthisday.com/images/article.svg",
 }
 
+DEFAULT_PRE_MESSAGES: list[str] = [
+    "Caw caw 🐦, did you hear that {ping}? It's the sound of Wild History™!",
+    "Grab your towel 🛸, {ping}! We're hitch-hiking through yesterday's headlines!",
+    "Spanners at the ready 🔧, {ping}! Time to wrench open past mysteries!",
+    "By the Librarian's tusks 🐘, {ping}, today's history is positively bananas!",
+    "Sound the klaxon 🚨, {ping}! A history emergency has arrived!",
+    "Ahoy mateys ⚓, {ping}! A tide of bygone tales washes ashore!",
+    "Don your top hat 🎩, {ping}! A historical caper awaits!",
+    "To the time machine 🕰️, {ping}! We're off to yesterday!",
+    "Tea kettle's whistling 🍵, {ping}! History's brewing something grand!",
+    "Blast off 🚀, {ping}! Prepare for a cosmic history tour!",
+    "Hear the hamster wheel 🐹, {ping}? That's the chronicle hamster running!",
+    "By the Great A'Tuin 🌏, {ping}, let's turtle-walk through time!"
+]
 
 def userday_to_pyweekday(userday: int) -> int:
-    # 1=Monday .. 7=Sunday → 0..6
     return (userday - 1) % 7
-
 
 def compute_next_occurrence(
     user_day: int,
@@ -38,14 +51,11 @@ def compute_next_occurrence(
     now: datetime | None = None,
     tzinfo: timezone | ZoneInfo = timezone.utc,
 ) -> datetime:
-    """
-    Next occurrence strictly after 'now' of given weekday+time in tzinfo.
-    """
     if now is None:
         now = datetime.now(tzinfo)
     else:
         now = now.astimezone(tzinfo)
-    target_wd = userday_to_pyweekday(user_day)
+    target_wd = userday_to_pyweekday(userday)
     days_ahead = (target_wd - now.weekday()) % 7
     candidate = datetime(
         now.year, now.month, now.day, hour, minute, tzinfo=tzinfo
@@ -54,7 +64,6 @@ def compute_next_occurrence(
         candidate += timedelta(days=7)
     return candidate
 
-
 def compute_last_occurrence(
     user_day: int,
     hour: int,
@@ -62,14 +71,11 @@ def compute_last_occurrence(
     now: datetime | None = None,
     tzinfo: timezone | ZoneInfo = timezone.utc,
 ) -> datetime:
-    """
-    Most recent occurrence at or before 'now' of given weekday+time in tzinfo.
-    """
     if now is None:
         now = datetime.now(tzinfo)
     else:
         now = now.astimezone(tzinfo)
-    target_wd = userday_to_pyweekday(user_day)
+    target_wd = userday_to_pyweekday(userday)
     days_ago = (now.weekday() - target_wd) % 7
     candidate = datetime(
         now.year, now.month, now.day, hour, minute, tzinfo=tzinfo
@@ -78,42 +84,40 @@ def compute_last_occurrence(
         candidate -= timedelta(days=7)
     return candidate
 
-
 async def mod_check(ctx: commands.Context) -> bool:
     return ctx.author.guild_permissions.manage_guild
 
-
 class ButtonView(discord.ui.View):
-    """A simple View of URL buttons for Wikipedia links."""
-
+    """A View of URL buttons for Wikipedia links."""
     def __init__(self, buttons: dict[str, str]):
         super().__init__(timeout=None)
         for label, url in buttons.items():
-            # truncate label if too long
             safe_label = label if len(label) < 80 else label[:77] + "..."
             self.add_item(discord.ui.Button(label=safe_label, url=url))
-
 
 class AGSOnThisDay(commands.Cog):
     """Automatic daily 'On This Day' posts from onthisday.com."""
 
     __author__ = "AEGIS Team"
-    __version__ = "1.0.0"
+    __version__ = "1.1.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
         self.session: aiohttp.ClientSession | None = None
         self.config = Config.get_conf(
-            self, identifier=0xA5C3B4D6F1, force_registration=True
+            self, identifier=0xA5C3B4D6F2, force_registration=True
         )
         self.config.register_guild(
             enabled=False,
             channel_id=None,
             timezone="UTC",
-            post_day=0,       # unused, we post daily
             post_hour=8,
             post_minute=0,
             last_posted_unix=0,
+            ping_role_id=None,
+            pre_messages=DEFAULT_PRE_MESSAGES,
+            prefix_order=[],
+            prefix_index=0,
         )
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
@@ -127,7 +131,7 @@ class AGSOnThisDay(commands.Cog):
         )
 
     async def red_delete_data_for_user(self, **kwargs):
-        """This cog does not store per-user data."""
+        """No per-user data stored."""
         return
 
     async def cog_load(self) -> None:
@@ -151,7 +155,7 @@ class AGSOnThisDay(commands.Cog):
                     try:
                         await self._handle_guild(guild, now_utc)
                     except Exception:
-                        self.bot.logger.exception("AGSOnThisDay error for guild %s", guild.id)
+                        self.bot.logger.exception("AGSOnThisDay error in guild %s", guild.id)
                 await asyncio.sleep(30)
             except asyncio.CancelledError:
                 break
@@ -170,7 +174,6 @@ class AGSOnThisDay(commands.Cog):
         if not isinstance(channel, discord.TextChannel):
             return
 
-        # timezone
         tz_str = cfg.get("timezone", "UTC")
         try:
             tz = ZoneInfo(tz_str)
@@ -180,28 +183,32 @@ class AGSOnThisDay(commands.Cog):
         ph = int(cfg.get("post_hour", 8))
         pm = int(cfg.get("post_minute", 0))
 
-        # compute last and next post times
         last_local = compute_last_occurrence(1, ph, pm, now=now_utc, tzinfo=tz)
         last_utc = last_local.astimezone(timezone.utc)
         next_local = compute_next_occurrence(1, ph, pm, now=now_utc, tzinfo=tz)
         next_utc = next_local.astimezone(timezone.utc)
 
         last_posted = int(cfg.get("last_posted_unix", 0))
-        # reset guard if clock moved backwards
         if last_posted > int(next_utc.timestamp()):
             await self.config.guild(guild).last_posted_unix.set(0)
             last_posted = 0
 
-        # if we're within 5 minutes of last_local and haven't posted it yet
         now_ts = now_utc.timestamp()
         window_start = last_utc.timestamp()
         if window_start <= now_ts <= window_start + 300:
-            post_ts = int(last_utc.timestamp())
+            post_ts = int(window_start)
             if last_posted < post_ts:
                 async with self._lock:
-                    # re-fetch inside lock
-                    lp = int(await self.config.guild(guild).last_posted_unix())
-                    if lp < post_ts:
+                    fresh = await self.config.guild(guild).all()
+                    if int(fresh.get("last_posted_unix", 0)) < post_ts:
+                        # send pre-message
+                        prefix = await self._get_next_prefix(guild, fresh)
+                        if prefix:
+                            try:
+                                await channel.send(prefix)
+                            except Exception:
+                                pass
+                        # send all sections
                         await self._post_today(channel)
                         await self.config.guild(guild).last_posted_unix.set(post_ts)
 
@@ -223,39 +230,29 @@ class AGSOnThisDay(commands.Cog):
     def _parse_section(
         self, tree: html.HtmlElement, title: str
     ) -> tuple[str, str | None, dict[str, str]] | None:
-        # find the <section> by its <h2> text
         hdr = tree.xpath(f"//h2[contains(normalize-space(), '{title}')]")
         if not hdr:
             return None
         sec = hdr[0]
-        # climb to section
         while sec is not None and sec.tag.lower() != "section":
             sec = sec.getparent()
         if sec is None:
             return None
-
-        # description: join all <p>
         paras = sec.xpath(".//p")
-        desc_texts = [p.text_content().strip() for p in paras if p.text_content().strip()]
-        description = "\n\n".join(desc_texts)[:4096] or None
-
-        # collect wikipedia links
+        descs = [p.text_content().strip() for p in paras if p.text_content().strip()]
+        description = "\n\n".join(descs)[:4096] or ""
         wiki: dict[str, str] = {}
         for a in sec.xpath(".//a[contains(@href,'wikipedia.org')]"):
             href = a.get("href")
             label = a.text_content().strip() or href
             wiki[label] = href
-
-        # find main image: last non-SVG <img>
-        img_srcs = sec.xpath(".//img[not(contains(@src,'.svg'))]/@data-src | .//img[not(contains(@src,'.svg'))]/@src")
-        image_url = img_srcs[-1] if img_srcs else None
-
-        return description or "", image_url, wiki
+        imgs = sec.xpath(".//img[not(contains(@src,'.svg'))]/@data-src | .//img[not(contains(@src,'.svg'))]/@src")
+        image_url = imgs[-1] if imgs else None
+        return description, image_url, wiki
 
     def _parse_today_in_history(
         self, tree: html.HtmlElement
     ) -> tuple[str, str | None, dict[str, str]] | None:
-        # Title is "Today in History"
         hdr = tree.xpath("//h2[contains(normalize-space(), 'Today in History')]")
         if not hdr:
             return None
@@ -264,8 +261,6 @@ class AGSOnThisDay(commands.Cog):
             sec = sec.getparent()
         if sec is None:
             return None
-
-        # pick top 5 <li>
         items = sec.xpath(".//ul/li")[:5]
         lines: list[str] = []
         wiki: dict[str, str] = {}
@@ -276,12 +271,9 @@ class AGSOnThisDay(commands.Cog):
                 href = a.get("href")
                 label = a.text_content().strip() or href
                 wiki[label] = href
-
-        description = "\n".join(lines) or ""
-        # image
-        img_srcs = sec.xpath(".//img[not(contains(@src,'.svg'))]/@data-src | .//img[not(contains(@src,'.svg'))]/@src")
-        image_url = img_srcs[-1] if img_srcs else None
-
+        description = "\n".join(lines)
+        imgs = sec.xpath(".//img[not(contains(@src,'.svg'))]/@data-src | .//img[not(contains(@src,'.svg'))]/@src")
+        image_url = imgs[-1] if imgs else None
         return description, image_url, wiki
 
     async def _post_today(self, channel: discord.TextChannel) -> None:
@@ -289,14 +281,12 @@ class AGSOnThisDay(commands.Cog):
         if tree is None:
             await channel.send("❌ Failed to retrieve On This Day content.")
             return
-
         sections = [
             ("Today in History",      self._parse_today_in_history),
             ("Did You Know?",         self._parse_section),
             ("Fun Fact About Today",  self._parse_section),
             ("Featured Article",      self._parse_section),
         ]
-
         for title, parser in sections:
             data = parser(tree, title)
             if not data:
@@ -317,8 +307,35 @@ class AGSOnThisDay(commands.Cog):
             try:
                 await channel.send(embed=embed, view=view)
             except Exception:
-                # fallback to embed only
                 await channel.send(embed=embed)
+
+    async def _get_next_prefix(self, guild: discord.Guild, data: dict | None = None) -> str:
+        if data is None:
+            data = await self.config.guild(guild).all()
+        pre_messages = data.get("pre_messages", DEFAULT_PRE_MESSAGES) or []
+        N = len(pre_messages)
+        if N == 0:
+            return ""
+        prefix_order = data.get("prefix_order") or []
+        prefix_index = int(data.get("prefix_index", 0) or 0)
+        if not prefix_order or prefix_index >= N:
+            prefix_order = list(range(N))
+            random.shuffle(prefix_order)
+            prefix_index = 0
+        idx = prefix_order[prefix_index]
+        prefix_index += 1
+        await self.config.guild(guild).prefix_order.set(prefix_order)
+        await self.config.guild(guild).prefix_index.set(prefix_index)
+        template = pre_messages[idx]
+        role_id = data.get("ping_role_id")
+        if not role_id:
+            return template.format(ping="")
+        role = guild.get_role(role_id)
+        if not role:
+            return template.format(ping="")
+        return template.format(ping=role.mention)
+
+    # ─── COMMANDS ────────────────────────────────────────────────────────────────
 
     @commands.group(name="agsonthisday", invoke_without_command=True)
     @commands.guild_only()
@@ -351,9 +368,7 @@ class AGSOnThisDay(commands.Cog):
     @agsonthisday.command()
     @commands.check(mod_check)
     async def settime(self, ctx: commands.Context, time_str: str) -> None:
-        """
-        Set the local time to post each day. Format HH:MM (24h).
-        """
+        """Set the local time to post each day. Format HH:MM."""
         m = re.match(r"^(\d{1,2}):(\d{2})$", time_str.strip())
         if not m:
             return await ctx.send("❌ Time must be in HH:MM format.")
@@ -363,22 +378,35 @@ class AGSOnThisDay(commands.Cog):
         await self.config.guild(ctx.guild).post_hour.set(hr)
         await self.config.guild(ctx.guild).post_minute.set(mn)
         await self.config.guild(ctx.guild).last_posted_unix.set(0)
-        await ctx.send(f"✅ Post time set to {hr:02d}:{mn:02d} (in guild timezone).")
+        await ctx.send(f"✅ Post time set to {hr:02d}:{mn:02d}.")
 
     @agsonthisday.command()
     @commands.check(mod_check)
     async def settimezone(self, ctx: commands.Context, timezone_name: str) -> None:
-        """
-        Set the IANA timezone for this guild’s posts.
-        Example: Europe/London, America/New_York, UTC, etc.
-        """
+        """Set the IANA timezone for posts."""
         try:
             ZoneInfo(timezone_name)
         except Exception:
-            return await ctx.send("❌ Invalid timezone. Please supply a valid IANA name.")
+            return await ctx.send("❌ Invalid timezone.")
         await self.config.guild(ctx.guild).timezone.set(timezone_name)
         await self.config.guild(ctx.guild).last_posted_unix.set(0)
         await ctx.send(f"✅ Timezone set to `{timezone_name}`.")
+
+    @agsonthisday.command()
+    @commands.check(mod_check)
+    async def setpingrole(self, ctx: commands.Context, role: discord.Role) -> None:
+        """Set the role to ping with the daily pre-message."""
+        await self.config.guild(ctx.guild).ping_role_id.set(role.id)
+        await ctx.send(f"✅ Ping role set to {role.mention}.")
+
+    @agsonthisday.command()
+    @commands.check(mod_check)
+    async def fetch(self, ctx: commands.Context) -> None:
+        """Fetch and post today's On This Day now (for testing)."""
+        prefix = await self._get_next_prefix(ctx.guild)
+        if prefix:
+            await ctx.send(prefix)
+        await self._post_today(ctx.channel)
 
     @agsonthisday.command()
     @commands.check(mod_check)
@@ -390,6 +418,7 @@ class AGSOnThisDay(commands.Cog):
         tz_str = data.get("timezone", "UTC")
         ph = int(data.get("post_hour", 8))
         pm = int(data.get("post_minute", 0))
+        role_id = data.get("ping_role_id")
 
         try:
             tz = ZoneInfo(tz_str)
@@ -397,6 +426,8 @@ class AGSOnThisDay(commands.Cog):
             tz = timezone.utc
 
         next_local = compute_next_occurrence(1, ph, pm, tzinfo=tz)
+        role = ctx.guild.get_role(role_id) if role_id else None
+
         embed = discord.Embed(title="AGS OnThisDay Status", color=discord.Color.blurple())
         embed.add_field(name="Enabled", value=str(enabled), inline=True)
         embed.add_field(
@@ -415,6 +446,7 @@ class AGSOnThisDay(commands.Cog):
             value=f"<t:{int(next_local.timestamp())}:t> (<t:{int(next_local.timestamp())}:R>)",
             inline=False,
         )
+        embed.add_field(name="Ping Role", value=(role.mention if role else "Not set"), inline=True)
         await ctx.send(embed=embed)
 
     @commands.is_owner()
@@ -423,7 +455,6 @@ class AGSOnThisDay(commands.Cog):
         """[Owner only] Dump the raw guild config."""
         data = await self.config.all_guilds()
         await ctx.send(box(str(data)))
-    
 
 async def setup(bot: Red) -> None:
     """Load the AGSOnThisDay cog."""
