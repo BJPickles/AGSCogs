@@ -253,7 +253,6 @@ class AGSOnThisDay(commands.Cog):
 
         def pick_best_from_srcset(raw: str) -> str:
             parts = [p.strip().split(" ") for p in raw.split(",")]
-
             def score(p):
                 if len(p) > 1:
                     if p[1].endswith("w"):
@@ -267,7 +266,6 @@ class AGSOnThisDay(commands.Cog):
                         except:
                             return 0
                 return 0
-
             parts.sort(key=score)
             return parts[-1][0]
 
@@ -279,19 +277,14 @@ class AGSOnThisDay(commands.Cog):
             )
             if not imgs:
                 return None
-
             raw = imgs[-1]
-
             if "," in raw:
                 url = pick_best_from_srcset(raw)
             else:
                 url = raw.split(" ")[0]
-
             url = normalize_url(url)
-
             if url and any(x in url.lower() for x in ("svg", "logo", "icon")):
                 return None
-
             return url
 
         def extract_wiki_links(node) -> dict[str, str]:
@@ -314,7 +307,6 @@ class AGSOnThisDay(commands.Cog):
             if image:
                 embed.set_image(url=image)
             embed.set_footer(text="from onthisday.com")
-
             items = list(wiki.items())[:24]
             view = ButtonView(dict(items)) if items else None
             return embed, view
@@ -332,22 +324,17 @@ class AGSOnThisDay(commands.Cog):
             )
             if hero:
                 hero = hero[0]
-
                 paras = hero.xpath(".//p")
                 desc = "\n\n".join(
                     p.text_content().strip()
                     for p in paras
                     if p.text_content().strip()
                 )[:4096]
-
                 if not desc or len(desc) < 50:
                     raise ValueError("Hero content too small")
-
                 if not main_img:
                     main_img = extract_best_image(hero)
-
                 wiki = extract_wiki_links(hero)
-
                 embed, view = build_embed(
                     "TODAY IN HISTORY",
                     desc,
@@ -355,7 +342,6 @@ class AGSOnThisDay(commands.Cog):
                     main_img,
                     wiki
                 )
-
                 await channel.send(embed=embed, view=view)
             else:
                 self.bot.logger.warning("OnThisDay: No hero section found")
@@ -363,49 +349,75 @@ class AGSOnThisDay(commands.Cog):
             self.bot.logger.exception("Failed to build hero embed")
 
         # ─────────────────────────────────────────────
-        # SIDEBAR SECTIONS
+        # SIDEBAR SECTIONS (FIXED)
         # ─────────────────────────────────────────────
 
-        html_sections = [
-            ("did-you-know",     "DID YOU KNOW?",        THUMBNAILS["did-you-know"]),
-            ("fun-fact",         "FUN FACT ABOUT TODAY", THUMBNAILS["fun-fact"]),
-            ("featured-article", "FEATURED ARTICLE",     THUMBNAILS["featured-article"]),
-        ]
+        try:
+            # --- DID YOU KNOW + FUN FACT share the SAME section ---
+            dyk_section = tree.xpath("(//section[contains(@class,'section--did-you-know')])[1]")
+            if dyk_section:
+                dyk_section = dyk_section[0]
+                paras = dyk_section.xpath(".//p")
+                did_you_know_parts: list[str] = []
+                fun_fact_parts: list[str] = []
+                for p in paras:
+                    text = p.text_content().strip()
+                    if not text:
+                        continue
+                    if "fun-fact" in (p.get("class") or ""):
+                        fun_fact_parts.append(text)
+                    else:
+                        did_you_know_parts.append(text)
+                # DID YOU KNOW?
+                if did_you_know_parts:
+                    desc = "\n\n".join(did_you_know_parts)[:4096]
+                    embed, view = build_embed(
+                        "DID YOU KNOW?",
+                        desc,
+                        THUMBNAILS["did-you-know"],
+                        extract_best_image(dyk_section),
+                        extract_wiki_links(dyk_section),
+                    )
+                    await channel.send(embed=embed, view=view)
+                # FUN FACT
+                if fun_fact_parts:
+                    desc = "\n\n".join(fun_fact_parts)[:4096]
+                    embed, view = build_embed(
+                        "FUN FACT ABOUT TODAY",
+                        desc,
+                        THUMBNAILS["fun-fact"],
+                        extract_best_image(dyk_section),
+                        extract_wiki_links(dyk_section),
+                    )
+                    await channel.send(embed=embed, view=view)
+        except Exception:
+            self.bot.logger.exception("Failed to build did-you-know / fun-fact section")
 
-        for cls, title, thumb in html_sections:
-            try:
-                sec = tree.xpath(
-                    f"(//section[contains(@class,'{cls}')] | "
-                    f"//div[contains(@class,'{cls}')])[1]"
-                )
-                if not sec:
-                    continue
-                sec = sec[0]
-
-                paras = sec.xpath(".//p")
+        try:
+            # FEATURED ARTICLE (separate section)
+            article = tree.xpath(
+                "(//section[contains(@class,'featured-article')] | "
+                "//div[contains(@class,'featured-article')])[1]"
+            )
+            if article:
+                article = article[0]
+                paras = article.xpath(".//p")
                 description = "\n\n".join(
                     p.text_content().strip()
                     for p in paras
                     if p.text_content().strip()
                 )[:4096]
-
-                if not description:
-                    continue
-
-                section_img = extract_best_image(sec) or main_img
-                wiki = extract_wiki_links(sec)
-
-                embed, view = build_embed(
-                    title,
-                    description,
-                    thumb,
-                    section_img,
-                    wiki
-                )
-
-                await channel.send(embed=embed, view=view)
-            except Exception:
-                self.bot.logger.exception(f"Failed to build section: {cls}")
+                if description:
+                    embed, view = build_embed(
+                        "FEATURED ARTICLE",
+                        description,
+                        THUMBNAILS["featured-article"],
+                        extract_best_image(article),
+                        extract_wiki_links(article),
+                    )
+                    await channel.send(embed=embed, view=view)
+        except Exception:
+            self.bot.logger.exception("Failed to build featured article section")
 
     async def _get_next_prefix(self, guild: discord.Guild, data: dict | None = None) -> str:
         if data is None:
