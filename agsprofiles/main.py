@@ -14,11 +14,12 @@ from redbot.core.data_manager import cog_data_path
 
 from .models import AGSConfig, GuildConfig, Snapshot, SnapshotMeta
 from .common import generate_snapshot_id, utc_timestamp
+from .commands import Commands as AGSCommands
 
 log = logging.getLogger("red.agsprofiles")
 
 
-class AGSProfiles(commands.Cog):
+class AGSProfiles(AGSCommands, commands.Cog):
     """
     AGSProfiles cog.
 
@@ -27,6 +28,7 @@ class AGSProfiles(commands.Cog):
 
     def __init__(self, bot: Red):
         self.bot: Red = bot
+        # base directory for all guild data
         self.base_path: Path = cog_data_path(self)
         self.base_path.mkdir(parents=True, exist_ok=True)
         self._save_lock = asyncio.Lock()
@@ -51,9 +53,9 @@ class AGSProfiles(commands.Cog):
         weekly_snapshot_loop.cancel()
         log.info("AGSProfiles unloaded; snapshot loops stopped")
 
-    # =========================================================
+    # ---------------------------------------------------------
     # PATH HELPERS
-    # =========================================================
+    # ---------------------------------------------------------
 
     def _guild_dir(self, guild_id: int) -> Path:
         """
@@ -68,9 +70,9 @@ class AGSProfiles(commands.Cog):
         subtype = snapshot_type.lower()
         return self._guild_dir(guild_id) / "snapshots" / subtype / f"{snapshot_id}.json"
 
-    # =========================================================
+    # ---------------------------------------------------------
     # HASH / JSON I/O HELPERS
-    # =========================================================
+    # ---------------------------------------------------------
 
     def _compute_sha256(self, path: Path) -> str:
         """
@@ -116,9 +118,9 @@ class AGSProfiles(commands.Cog):
         except Exception:
             log.warning(f"Failed deleting snapshot file {path}")
 
-    # =========================================================
+    # ---------------------------------------------------------
     # CONFIG ACCESS
-    # =========================================================
+    # ---------------------------------------------------------
 
     def get_guild_conf(self, guild_id: int) -> GuildConfig:
         """
@@ -126,9 +128,9 @@ class AGSProfiles(commands.Cog):
         """
         return self.config.guilds.setdefault(guild_id, GuildConfig())
 
-    # =========================================================
+    # ---------------------------------------------------------
     # LOADERS
-    # =========================================================
+    # ---------------------------------------------------------
 
     def _load_all_guilds(self):
         """
@@ -217,9 +219,9 @@ class AGSProfiles(commands.Cog):
 
         return cfg
 
-    # =========================================================
+    # ---------------------------------------------------------
     # SAVERS
-    # =========================================================
+    # ---------------------------------------------------------
 
     async def save(self):
         """
