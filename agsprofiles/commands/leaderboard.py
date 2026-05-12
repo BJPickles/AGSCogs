@@ -2,7 +2,7 @@
 
 import math
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import discord
 from redbot.core import commands
