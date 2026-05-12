@@ -1,0 +1,20 @@
+# info.json
+{
+  "author": ["BJPickles"],
+  "description": "Year-in-review snapshots piggy-backing on LevelUp stats",
+  "short": "Annual & periodic Year-in-Review snapshots for LevelUp",
+  "type": "COG",
+  "permissions": [
+    "read_messages",
+    "send_messages",
+    "embed_links",
+    "attach_files",
+    "manage_roles"
+  ],
+  "min_bot_version": "3.5.0",
+  "min_python_version": [3, 9, 0],
+  "install_msg": "Thank you for installing AGSProfiles! Run `[p]agsnapshot manual` to capture your first snapshot.",
+  "end_user_data_statement": "This cog stores Discord IDs, snapshot timestamps, and aggregated LevelUp statistics. No other user data is stored.",
+  "hidden": false,
+  "disabled": false
+}
