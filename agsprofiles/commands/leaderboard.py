@@ -54,8 +54,8 @@ class LeaderboardCommands(commands.Cog):
         if stat not in VALID_STATS:
             return await ctx.send(_("Invalid stat `{stat}`.").format(stat=stat))
 
-        await ctx.trigger_typing()
-        data = await collect_levelup_stats(self.bot, ctx.guild)
+        async with ctx.typing():
+            data = await collect_levelup_stats(self.bot, ctx.guild)
         if not data:
             return await ctx.send(_("No LevelUp data available."))
 
