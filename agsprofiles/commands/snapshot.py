@@ -42,7 +42,7 @@ class SnapshotCommands:
         """
         guild = ctx.guild
         async with ctx.typing():
-        stats = await collect_levelup_stats(self.bot, guild)
+            stats = await collect_levelup_stats(self.bot, guild)
         if not stats:
             return await ctx.send(_("No LevelUp data available to snapshot."))
 
@@ -107,7 +107,7 @@ class SnapshotCommands:
             return await ctx.send(warning(_("Year {yr} already finalized; use --force.").format(yr=target_year)))
 
         async with ctx.typing():
-        stats = await collect_levelup_stats(self.bot, guild)
+            stats = await collect_levelup_stats(self.bot, guild)
         if not stats:
             return await ctx.send(_("No LevelUp data available to finalize."))
 
