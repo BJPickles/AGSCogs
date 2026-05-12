@@ -4,7 +4,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
-from redbot.core import tasks
+from discord.ext import tasks
 
 from .common import collect_levelup_stats, generate_snapshot_id
 from .models import Snapshot, SnapshotType, SnapshotMeta
