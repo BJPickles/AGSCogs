@@ -41,7 +41,7 @@ class SnapshotCommands:
         Take a manual backup snapshot of current LevelUp stats.
         """
         guild = ctx.guild
-        await ctx.trigger_typing()
+        async with ctx.typing():
         stats = await collect_levelup_stats(self.bot, guild)
         if not stats:
             return await ctx.send(_("No LevelUp data available to snapshot."))
@@ -106,7 +106,7 @@ class SnapshotCommands:
         if existing and existing.finalized and not force:
             return await ctx.send(warning(_("Year {yr} already finalized; use --force.").format(yr=target_year)))
 
-        await ctx.trigger_typing()
+        async with ctx.typing():
         stats = await collect_levelup_stats(self.bot, guild)
         if not stats:
             return await ctx.send(_("No LevelUp data available to finalize."))
