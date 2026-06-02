@@ -53,7 +53,7 @@ class AGSVoiceAnnounce(commands.Cog):
     """Announce qualifying public/invite-only AutoRoom voice sessions."""
 
     __author__ = "AEGIS Game Studios"
-    __version__ = "1.0.0"
+    __version__ = "1.0.1"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -62,6 +62,7 @@ class AGSVoiceAnnounce(commands.Cog):
         self.config.register_guild(
             announcement_channel_id=None,
             ping_role_id=None,
+            view_role_id=None,
             opt_out_role_id=None,
             blacklisted_voice_channel_ids=[],
             delay_seconds=15,
@@ -272,8 +273,9 @@ class AGSVoiceAnnounce(commands.Cog):
         if opt_role in member.roles:
             return False, "member is opted out"
 
-        if self._is_private_voice_channel(voice_channel, ping_role):
-            return False, "voice channel is private for the ping role"
+        view_role = self._privacy_view_role(guild, data)
+        if self._is_private_voice_channel(voice_channel, view_role):
+            return False, f"voice channel is private for the privacy/view role ({view_role.name})"
 
         ok, reason = self._check_announce_channel_permissions(announce_channel, ping_role)
         if not ok:
@@ -289,6 +291,21 @@ class AGSVoiceAnnounce(commands.Cog):
     def _is_private_voice_channel(channel: discord.VoiceChannel, audience_role: discord.Role) -> bool:
         perms = channel.permissions_for(audience_role)
         return not perms.view_channel
+
+    @staticmethod
+    def _voice_channel_kind(channel: discord.VoiceChannel, audience_role: discord.Role) -> str:
+        perms = channel.permissions_for(audience_role)
+        if not perms.view_channel:
+            return "Private"
+        if not perms.connect:
+            return "Invite-only / locked"
+        return "Public"
+
+    @staticmethod
+    def _privacy_view_role(guild: discord.Guild, data: dict) -> discord.Role:
+        role_id = data.get("view_role_id")
+        role = guild.get_role(role_id) if role_id else None
+        return role or guild.default_role
 
     def _check_announce_channel_permissions(
         self, channel: discord.TextChannel, ping_role: Optional[discord.Role] = None
@@ -488,6 +505,32 @@ class AGSVoiceAnnounce(commands.Cog):
                     return await ctx.send(f"❌ {reason}")
         await self.config.guild(ctx.guild).ping_role_id.set(role.id)
         await ctx.send(f"✅ Ping role set to {role.mention}. I will use controlled allowed mentions so this role is the one pinged.")
+
+    @agsvoiceannounce.group(name="viewrole", invoke_without_command=True)
+    @commands.is_owner()
+    @commands.guild_only()
+    async def set_view_role(self, ctx: commands.Context, role: Optional[discord.Role] = None):
+        """Set the role used to decide whether a voice channel is private. Defaults to @everyone when cleared."""
+        if role is None:
+            data = await self.config.guild(ctx.guild).all()
+            current = self._privacy_view_role(ctx.guild, data)
+            return await ctx.send(
+                f"Current privacy/view role: {current.mention}. "
+                "Use this command with a role to change it, or `viewrole clear` to fall back to @everyone."
+            )
+        await self.config.guild(ctx.guild).view_role_id.set(role.id)
+        await ctx.send(
+            f"✅ Privacy/view role set to {role.mention}. I will use this role to classify voice channels as public, invite-only/locked, or private. "
+            f"The ping role remains separate."
+        )
+
+    @set_view_role.command(name="clear")
+    @commands.is_owner()
+    @commands.guild_only()
+    async def clear_view_role(self, ctx: commands.Context):
+        """Clear the privacy/view role and fall back to @everyone."""
+        await self.config.guild(ctx.guild).view_role_id.set(None)
+        await ctx.send("✅ Privacy/view role cleared. I will fall back to @everyone for private-channel detection.")
 
     @agsvoiceannounce.command(name="optrole")
     @commands.is_owner()
@@ -711,11 +754,13 @@ class AGSVoiceAnnounce(commands.Cog):
         data = await self.config.guild(ctx.guild).all()
         announce = ctx.guild.get_channel(data.get("announcement_channel_id"))
         ping = ctx.guild.get_role(data.get("ping_role_id"))
+        view = self._privacy_view_role(ctx.guild, data)
         opt = ctx.guild.get_role(data.get("opt_out_role_id"))
         blacklist_ids = data.get("blacklisted_voice_channel_ids") or []
         embed = discord.Embed(title="AGSVoiceAnnounce Settings", color=discord.Color.blurple())
         embed.add_field(name="Announcement channel", value=announce.mention if announce else "Not set / missing", inline=False)
         embed.add_field(name="Ping role", value=ping.mention if ping else "Not set / missing", inline=True)
+        embed.add_field(name="Privacy/view role", value=view.mention, inline=True)
         embed.add_field(name="Opt-out role", value=opt.mention if opt else "Not set / missing", inline=True)
         embed.add_field(name="Delay", value=f"{data.get('delay_seconds', 15)}s", inline=True)
         embed.add_field(name="Rejoin grace", value=f"{data.get('rejoin_grace_seconds', 300)}s", inline=True)

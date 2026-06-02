@@ -5,7 +5,7 @@ A Red Discord Bot cog for AEGIS Game Studios that announces qualifying AutoRoom 
 ## What it does
 
 - Announces once per qualifying public or invite-only voice room/session.
-- Never announces private voice rooms, based on whether the configured ping role can view the voice channel.
+- Never announces private voice rooms, based on whether the configured privacy/view role can view the voice channel. The ping role and privacy/view role are separate settings.
 - Ignores bots.
 - Uses a configured opt-out role; users with that role never trigger announcements.
 - Supports manual opt-in/opt-out commands as a backup to role-button systems.
@@ -24,11 +24,13 @@ Load the cog, then configure:
 [p]agsvoiceannounce channel #announcements
 [p]agsvoiceannounce pingrole @Voice Ping
 [p]agsvoiceannounce optrole @Voice Announce Opt Out
+[p]agsvoiceannounce viewrole @Members
 ```
 
 Optional settings:
 
 ```text
+[p]agsvoiceannounce viewrole clear  # fall back to @everyone for privacy detection
 [p]agsvoiceannounce delay 15
 [p]agsvoiceannounce rejoingrace 300
 [p]agsvoiceannounce blacklist add <voice channel>
@@ -72,4 +74,4 @@ The bot owner may also use:
 
 ## Important permission notes
 
-The bot needs to view/send in the announcement channel. To true-ping a role, either the role must be mentionable or the bot must have Mention Everyone permission in that channel. To use opt-in/out role commands, the bot needs Manage Roles and its top role must be above the configured opt-out role.
+The privacy/view role is used only to classify voice rooms: if it can view a room, the room is considered public or invite-only/locked; if it cannot view the room, the room is considered private and will not announce. The bot needs to view/send in the announcement channel. To true-ping a role, either the role must be mentionable or the bot must have Mention Everyone permission in that channel. To use opt-in/out role commands, the bot needs Manage Roles and its top role must be above the configured opt-out role.

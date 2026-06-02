@@ -4,7 +4,7 @@
   "disabled": false,
   "end_user_data_statement": "Stores guild configuration and message rotation state only. User opt-out state is represented by a configured Discord role and is not stored separately by this cog.",
   "hidden": false,
-  "install_msg": "Thank you for installing AGSVoiceAnnounce. Configure it with `[p]agsvoiceannounce channel`, `[p]agsvoiceannounce pingrole`, and `[p]agsvoiceannounce optrole`.",
+  "install_msg": "Thank you for installing AGSVoiceAnnounce. Configure it with `[p]agsvoiceannounce channel`, `[p]agsvoiceannounce pingrole`, `[p]agsvoiceannounce optrole`, and optionally `[p]agsvoiceannounce viewrole`.",
   "min_bot_version": "3.5.0",
   "min_python_version": [3, 9, 1],
   "permissions": ["send_messages", "view_channel", "mention_everyone", "manage_roles", "embed_links"],
