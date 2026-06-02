@@ -1,0 +1,16 @@
+{
+  "author": ["AEGIS Game Studios", "AGSCogs"],
+  "description": "Announces qualifying public or invite-only AutoRoom voice sessions with opt-out role support, true role pings, blacklists, delays, and persistent random message rotation.",
+  "disabled": false,
+  "end_user_data_statement": "Stores guild configuration and message rotation state only. User opt-out state is represented by a configured Discord role and is not stored separately by this cog.",
+  "hidden": false,
+  "install_msg": "Thank you for installing AGSVoiceAnnounce. Configure it with `[p]agsvoiceannounce channel`, `[p]agsvoiceannounce pingrole`, and `[p]agsvoiceannounce optrole`.",
+  "min_bot_version": "3.5.0",
+  "min_python_version": [3, 9, 1],
+  "permissions": ["send_messages", "view_channel", "mention_everyone", "manage_roles", "embed_links"],
+  "required_cogs": {},
+  "requirements": [],
+  "short": "Voice room announcement pings with opt-out support.",
+  "tags": ["voice", "autoroom", "announcement", "utility", "ags"],
+  "type": "COG"
+}
