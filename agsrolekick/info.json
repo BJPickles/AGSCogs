@@ -1,0 +1,17 @@
+{
+    "author": ["Dodo No More", "AEGIS Game Studios"],
+    "install_msg": "Thank you for installing AGSVRoleKick. Load it with `[p]load agsvrolekick`, then use `[p]help agsrolekick`.",
+    "name": "AGSVRoleKick",
+    "short": "Kick all members with a specified role, with blacklist safeguards.",
+    "description": "A bot-owner-only Red cog that manually kicks members who have a specified role. Includes DM-before-kick, role/user blacklists, persistent settings, reporting, permission checks, and Red ModLog case creation.",
+    "tags": [
+        "moderation",
+        "kick",
+        "role",
+        "cleanup",
+        "aegis"
+    ],
+    "requirements": [],
+    "min_bot_version": "3.5.0",
+    "end_user_data_statement": "This cog stores guild configuration only: report channel ID, invite link, blacklisted role IDs, and blacklisted user IDs. It does not store kicked member records persistently."
+}
