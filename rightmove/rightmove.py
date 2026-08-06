@@ -2077,223 +2077,238 @@ class RightmoveCog(commands.Cog):
         if lock.locked() and source != "scheduled":
             return {"ok": False, "message": "A scrape is already running for this server."}
 
-        async with lock:
-            guild_config = self.config.guild(guild)
-            settings = await guild_config.settings()
-            settings["last_attempt_ts"] = _utc_ts()
-            await guild_config.settings.set(settings)
+        # Direct setup/manual/adopt runs used to be invisible to ``rm stop``
+        # because only background tasks were recorded in _active_runs. Track
+        # the current task too, without replacing a task already registered by
+        # _launch_background_run. This lets ``rm stop`` cancel any live scrape.
+        current_task = asyncio.current_task()
+        registered_here = False
+        active = self._active_runs.get(guild.id)
+        if current_task is not None and (active is None or active.done()):
+            self._active_runs[guild.id] = current_task
+            registered_here = True
 
-            try:
-                await self._migrate_legacy_global(guild)
+        try:
+            async with lock:
+                guild_config = self.config.guild(guild)
                 settings = await guild_config.settings()
-                search_url = settings.get("search_url")
-                anchor_id = _safe_int(settings.get("anchor_channel_id"))
-                anchor = guild.get_channel(anchor_id) if anchor_id else None
+                settings["last_attempt_ts"] = _utc_ts()
+                await guild_config.settings.set(settings)
 
-                if not search_url:
-                    raise RuntimeError("No search URL is configured. Use `rm seturl <Rightmove URL>`. ")
-                valid, reason = _validate_rightmove_url(search_url)
-                if not valid:
-                    raise RuntimeError(reason)
-                if not isinstance(anchor, discord.TextChannel):
-                    raise RuntimeError("The configured anchor channel no longer exists. Use `rm setanchor`.")
-                if anchor.category is not None:
-                    raise RuntimeError("The anchor channel must be uncategorised so property channels can sit below it.")
+                try:
+                    await self._migrate_legacy_global(guild)
+                    settings = await guild_config.settings()
+                    search_url = settings.get("search_url")
+                    anchor_id = _safe_int(settings.get("anchor_channel_id"))
+                    anchor = guild.get_channel(anchor_id) if anchor_id else None
 
-                scrape = await asyncio.to_thread(RightmoveClient.scrape_search, search_url)
-                if scrape.pages_fetched == 0:
-                    raise RuntimeError("The Rightmove search could not be fetched: " + "; ".join(scrape.errors))
+                    if not search_url:
+                        raise RuntimeError("No search URL is configured. Use `rm seturl <Rightmove URL>`. ")
+                    valid, reason = _validate_rightmove_url(search_url)
+                    if not valid:
+                        raise RuntimeError(reason)
+                    if not isinstance(anchor, discord.TextChannel):
+                        raise RuntimeError("The configured anchor channel no longer exists. Use `rm setanchor`.")
+                    if anchor.category is not None:
+                        raise RuntimeError("The anchor channel must be uncategorised so property channels can sit below it.")
 
-                cache_raw = await guild_config.properties()
-                cache: Dict[str, Dict[str, Any]] = {
-                    str(pid): self._normalise_cached_state(str(pid), raw)
-                    for pid, raw in cache_raw.items()
-                    if isinstance(raw, dict)
-                }
-                ignored = await guild_config.ignored_properties()
-                discovered = self._discover_channels(guild)
+                    scrape = await asyncio.to_thread(RightmoveClient.scrape_search, search_url)
+                    if scrape.pages_fetched == 0:
+                        raise RuntimeError("The Rightmove search could not be fetched: " + "; ".join(scrape.errors))
 
-                accepted: Dict[str, Tuple[Dict[str, Any], Dict[str, str]]] = {}
-                newly_ignored = 0
-                for pid, row in scrape.properties.items():
-                    preliminary_reason = self._filter_reason(row, settings)
-                    if preliminary_reason:
-                        ignored[pid] = {
-                            "fingerprint": row.get("fingerprint"),
-                            "reason": preliminary_reason,
-                            "description": "",
-                            "filter_text": "",
-                            "last_seen_ts": _utc_ts(),
-                        }
-                        newly_ignored += 1
-                        continue
+                    cache_raw = await guild_config.properties()
+                    cache: Dict[str, Dict[str, Any]] = {
+                        str(pid): self._normalise_cached_state(str(pid), raw)
+                        for pid, raw in cache_raw.items()
+                        if isinstance(raw, dict)
+                    }
+                    ignored = await guild_config.ignored_properties()
+                    discovered = self._discover_channels(guild)
 
-                    details = await self._details_for_candidate(
-                        row,
-                        cache.get(pid),
-                        ignored.get(pid) if isinstance(ignored.get(pid), dict) else None,
-                        force_refresh=force_refresh,
-                    )
-                    final_reason = self._filter_reason(row, settings, details.get("filter_text", ""))
-                    if final_reason:
-                        ignored[pid] = {
-                            "fingerprint": row.get("fingerprint"),
-                            "reason": final_reason,
-                            "description": details.get("description", ""),
-                            "filter_text": details.get("filter_text", ""),
-                            "last_seen_ts": _utc_ts(),
-                        }
-                        newly_ignored += 1
-                        continue
+                    accepted: Dict[str, Tuple[Dict[str, Any], Dict[str, str]]] = {}
+                    newly_ignored = 0
+                    for pid, row in scrape.properties.items():
+                        preliminary_reason = self._filter_reason(row, settings)
+                        if preliminary_reason:
+                            ignored[pid] = {
+                                "fingerprint": row.get("fingerprint"),
+                                "reason": preliminary_reason,
+                                "description": "",
+                                "filter_text": "",
+                                "last_seen_ts": _utc_ts(),
+                            }
+                            newly_ignored += 1
+                            continue
 
-                    details["scheme_matches"] = self._scheme_highlight_matches(
-                        row,
-                        settings,
-                        details.get("filter_text", ""),
-                    )
-                    ignored.pop(pid, None)
-                    accepted[pid] = (row, details)
-
-                created = 0
-                updated = 0
-                recovered = 0
-                unchanged = 0
-                errors: List[str] = []
-
-                for pid, (row, details) in sorted(
-                    accepted.items(),
-                    key=lambda item: (_safe_int(item[1][0].get("price")) or 10**18, item[0]),
-                ):
-                    old_raw = cache.get(pid)
-                    state, event, changed = self._merge_property_state(pid, row, old_raw, details)
-                    had_valid_channel = False
-                    if old_raw:
-                        old_channel_id = _safe_int(old_raw.get("channel_id"))
-                        had_valid_channel = isinstance(guild.get_channel(old_channel_id), discord.TextChannel)
-
-                    try:
-                        state, made_channel, wrote_embed = await self._ensure_channel_and_message(
-                            guild,
-                            anchor,
-                            settings,
-                            state,
-                            event,
-                            discovered,
+                        details = await self._details_for_candidate(
+                            row,
+                            cache.get(pid),
+                            ignored.get(pid) if isinstance(ignored.get(pid), dict) else None,
                             force_refresh=force_refresh,
                         )
-                    except (discord.Forbidden, discord.HTTPException) as exc:
-                        errors.append(f"prop-{pid}: {exc}")
-                        continue
+                        final_reason = self._filter_reason(row, settings, details.get("filter_text", ""))
+                        if final_reason:
+                            ignored[pid] = {
+                                "fingerprint": row.get("fingerprint"),
+                                "reason": final_reason,
+                                "description": details.get("description", ""),
+                                "filter_text": details.get("filter_text", ""),
+                                "last_seen_ts": _utc_ts(),
+                            }
+                            newly_ignored += 1
+                            continue
 
-                    cache[pid] = state
-                    # Persist after each property so Discord and Config cannot drift far apart.
+                        details["scheme_matches"] = self._scheme_highlight_matches(
+                            row,
+                            settings,
+                            details.get("filter_text", ""),
+                        )
+                        ignored.pop(pid, None)
+                        accepted[pid] = (row, details)
+
+                    created = 0
+                    updated = 0
+                    recovered = 0
+                    unchanged = 0
+                    errors: List[str] = []
+
+                    for pid, (row, details) in sorted(
+                        accepted.items(),
+                        key=lambda item: (_safe_int(item[1][0].get("price")) or 10**18, item[0]),
+                    ):
+                        old_raw = cache.get(pid)
+                        state, event, changed = self._merge_property_state(pid, row, old_raw, details)
+                        had_valid_channel = False
+                        if old_raw:
+                            old_channel_id = _safe_int(old_raw.get("channel_id"))
+                            had_valid_channel = isinstance(guild.get_channel(old_channel_id), discord.TextChannel)
+
+                        try:
+                            state, made_channel, wrote_embed = await self._ensure_channel_and_message(
+                                guild,
+                                anchor,
+                                settings,
+                                state,
+                                event,
+                                discovered,
+                                force_refresh=force_refresh,
+                            )
+                        except (discord.Forbidden, discord.HTTPException) as exc:
+                            errors.append(f"prop-{pid}: {exc}")
+                            continue
+
+                        cache[pid] = state
+                        # Persist after each property so Discord and Config cannot drift far apart.
+                        await guild_config.properties.set(cache)
+
+                        if made_channel:
+                            created += 1
+                        elif wrote_embed and (changed or force_refresh):
+                            updated += 1
+                        else:
+                            unchanged += 1
+
+                        if old_raw and not had_valid_channel and not made_channel:
+                            recovered += 1
+
+                    # Missing listings are only counted after a demonstrably complete scrape.
+                    removed = 0
+                    missing_marked = 0
+                    if scrape.complete:
+                        accepted_ids = set(accepted)
+                        threshold = max(1, int(settings.get("missing_confirmations", 3)))
+                        for pid in list(cache):
+                            if pid in accepted_ids:
+                                continue
+                            state = self._normalise_cached_state(pid, cache[pid])
+                            state["missing_count"] = int(state.get("missing_count", 0)) + 1
+                            missing_marked += 1
+                            if state["missing_count"] >= threshold:
+                                channel_id = _safe_int(state.get("channel_id"))
+                                channel = guild.get_channel(channel_id) if channel_id else None
+                                if isinstance(channel, discord.TextChannel):
+                                    try:
+                                        await channel.delete(reason="Rightmove listing absent from complete scrapes")
+                                    except (discord.Forbidden, discord.HTTPException) as exc:
+                                        errors.append(f"Could not delete prop-{pid}: {exc}")
+                                        cache[pid] = state
+                                        continue
+                                cache.pop(pid, None)
+                                removed += 1
+                            else:
+                                cache[pid] = state
+                            await guild_config.properties.set(cache)
+                    else:
+                        errors.append("Scrape was incomplete; no missing counters were changed and no channels were deleted.")
+
+                    await guild_config.ignored_properties.set(ignored)
                     await guild_config.properties.set(cache)
 
-                    if made_channel:
-                        created += 1
-                    elif wrote_embed and (changed or force_refresh):
-                        updated += 1
+                    moved, move_errors = await self._reorder_channels(guild, anchor, cache)
+                    errors.extend(move_errors)
+
+                    now = _utc_ts()
+                    settings = await guild_config.settings()
+                    if scrape.complete:
+                        settings["last_success_ts"] = now
+                        settings["consecutive_failures"] = 0
                     else:
-                        unchanged += 1
+                        # Keep last_success_ts unchanged so the scheduler retries later
+                        # instead of treating a partial scrape as the day's success.
+                        settings["consecutive_failures"] = int(settings.get("consecutive_failures", 0)) + 1
+                    settings["last_summary"] = _encode_summary({
+                        "timestamp": now,
+                        "source": source,
+                        "complete": scrape.complete,
+                        "expected": scrape.expected_count,
+                        "parsed": len(scrape.properties),
+                        "accepted": len(accepted),
+                        "created": created,
+                        "updated": updated,
+                        "unchanged": unchanged,
+                        "removed": removed,
+                        "moved": moved,
+                        "ignored": newly_ignored,
+                        "highlighted": sum(
+                            1 for state in cache.values()
+                            if isinstance(state, dict) and state.get("scheme_highlighted")
+                        ),
+                        "errors": errors[-10:],
+                    })
+                    await guild_config.settings.set(settings)
 
-                    if old_raw and not had_valid_channel and not made_channel:
-                        recovered += 1
+                    summary = (
+                        f"Scrape complete for **{settings.get('profile_name', 'Rightmove')}**: "
+                        f"{len(accepted)} accepted, {created} created, {updated} updated, "
+                        f"{unchanged} unchanged, {removed} removed, {moved} moved, "
+                        f"{sum(1 for state in cache.values() if isinstance(state, dict) and state.get('scheme_highlighted'))} highlighted. "
+                        f"Rightmove parse complete: **{scrape.complete}**."
+                    )
+                    if scrape.errors:
+                        summary += "\nScraper notes: " + " | ".join(scrape.errors[:5])
+                    if errors:
+                        summary += "\nOperational notes: " + " | ".join(errors[:5])
+                    await self._log(guild, summary)
+                    return {"ok": True, "message": summary}
 
-                # Missing listings are only counted after a demonstrably complete scrape.
-                removed = 0
-                missing_marked = 0
-                if scrape.complete:
-                    accepted_ids = set(accepted)
-                    threshold = max(1, int(settings.get("missing_confirmations", 3)))
-                    for pid in list(cache):
-                        if pid in accepted_ids:
-                            continue
-                        state = self._normalise_cached_state(pid, cache[pid])
-                        state["missing_count"] = int(state.get("missing_count", 0)) + 1
-                        missing_marked += 1
-                        if state["missing_count"] >= threshold:
-                            channel_id = _safe_int(state.get("channel_id"))
-                            channel = guild.get_channel(channel_id) if channel_id else None
-                            if isinstance(channel, discord.TextChannel):
-                                try:
-                                    await channel.delete(reason="Rightmove listing absent from complete scrapes")
-                                except (discord.Forbidden, discord.HTTPException) as exc:
-                                    errors.append(f"Could not delete prop-{pid}: {exc}")
-                                    cache[pid] = state
-                                    continue
-                            cache.pop(pid, None)
-                            removed += 1
-                        else:
-                            cache[pid] = state
-                        await guild_config.properties.set(cache)
-                else:
-                    errors.append("Scrape was incomplete; no missing counters were changed and no channels were deleted.")
-
-                await guild_config.ignored_properties.set(ignored)
-                await guild_config.properties.set(cache)
-
-                moved, move_errors = await self._reorder_channels(guild, anchor, cache)
-                errors.extend(move_errors)
-
-                now = _utc_ts()
-                settings = await guild_config.settings()
-                if scrape.complete:
-                    settings["last_success_ts"] = now
-                    settings["consecutive_failures"] = 0
-                else:
-                    # Keep last_success_ts unchanged so the scheduler retries later
-                    # instead of treating a partial scrape as the day's success.
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    settings = await guild_config.settings()
                     settings["consecutive_failures"] = int(settings.get("consecutive_failures", 0)) + 1
-                settings["last_summary"] = _encode_summary({
-                    "timestamp": now,
-                    "source": source,
-                    "complete": scrape.complete,
-                    "expected": scrape.expected_count,
-                    "parsed": len(scrape.properties),
-                    "accepted": len(accepted),
-                    "created": created,
-                    "updated": updated,
-                    "unchanged": unchanged,
-                    "removed": removed,
-                    "moved": moved,
-                    "ignored": newly_ignored,
-                    "highlighted": sum(
-                        1 for state in cache.values()
-                        if isinstance(state, dict) and state.get("scheme_highlighted")
-                    ),
-                    "errors": errors[-10:],
-                })
-                await guild_config.settings.set(settings)
-
-                summary = (
-                    f"Scrape complete for **{settings.get('profile_name', 'Rightmove')}**: "
-                    f"{len(accepted)} accepted, {created} created, {updated} updated, "
-                    f"{unchanged} unchanged, {removed} removed, {moved} moved, "
-                    f"{sum(1 for state in cache.values() if isinstance(state, dict) and state.get('scheme_highlighted'))} highlighted. "
-                    f"Rightmove parse complete: **{scrape.complete}**."
-                )
-                if scrape.errors:
-                    summary += "\nScraper notes: " + " | ".join(scrape.errors[:5])
-                if errors:
-                    summary += "\nOperational notes: " + " | ".join(errors[:5])
-                await self._log(guild, summary)
-                return {"ok": True, "message": summary}
-
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                settings = await guild_config.settings()
-                settings["consecutive_failures"] = int(settings.get("consecutive_failures", 0)) + 1
-                settings["last_summary"] = _encode_summary({
-                    "timestamp": _utc_ts(),
-                    "source": source,
-                    "complete": False,
-                    "error": repr(exc),
-                })
-                await guild_config.settings.set(settings)
-                await self._log(guild, f"Scrape failed: {exc!r}")
-                log.exception("Rightmove scrape failed in guild %s", guild.id)
-                return {"ok": False, "message": f"Scrape failed: {exc}"}
+                    settings["last_summary"] = _encode_summary({
+                        "timestamp": _utc_ts(),
+                        "source": source,
+                        "complete": False,
+                        "error": repr(exc),
+                    })
+                    await guild_config.settings.set(settings)
+                    await self._log(guild, f"Scrape failed: {exc!r}")
+                    log.exception("Rightmove scrape failed in guild %s", guild.id)
+                    return {"ok": False, "message": f"Scrape failed: {exc}"}
+        finally:
+            if registered_here and self._active_runs.get(guild.id) is current_task:
+                self._active_runs.pop(guild.id, None)
 
     # ------------------------------------------------------------------
     # Commands
@@ -2452,12 +2467,16 @@ class RightmoveCog(commands.Cog):
 
     @rm.command(name="stop")
     async def rm_stop(self, ctx: commands.Context) -> None:
-        """Disable scheduled monitoring without deleting property data."""
+        """Disable scheduled monitoring and cancel any scrape currently running."""
         await self.config.guild(ctx.guild).settings.set_raw("enabled", value=False)
         active = self._active_runs.get(ctx.guild.id)
-        if active and not active.done():
+        cancelled = bool(active and not active.done())
+        if cancelled:
             active.cancel()
-        await ctx.send("✅ Scheduled monitoring disabled for this server.")
+        await ctx.send(
+            "✅ Scheduled monitoring disabled for this server."
+            + (" The active scrape was cancelled." if cancelled else " No scrape was running.")
+        )
 
     @rm.command(name="run", aliases=["test"])
     async def rm_run(self, ctx: commands.Context, option: Optional[str] = None) -> None:
@@ -2801,6 +2820,145 @@ class RightmoveCog(commands.Cog):
         settings[key] = new_values
         await self.config.guild(ctx.guild).settings.set(settings)
         await ctx.send(f"✅ Removed **{value}** from banned {label}s.")
+
+    @rm.command(name="purgeover")
+    async def rm_purgeover(
+        self,
+        ctx: commands.Context,
+        maximum_price: int,
+        confirmation: Optional[str] = None,
+    ) -> None:
+        """Preview or purge this server's tracked properties priced above a limit.
+
+        Run ``rm purgeover 200000`` for a preview, then append ``confirm``
+        to delete the matching property channels and their guild cache records.
+        Other servers and all profile settings are untouched.
+        """
+        if maximum_price < 1:
+            return await ctx.send("❌ Supply a positive maximum price, for example `rm purgeover 200000`.")
+        if self._lock_for(ctx.guild.id).locked():
+            return await ctx.send("❌ Wait for the current scrape to finish or stop it first.")
+
+        guild_config = self.config.guild(ctx.guild)
+        settings = await guild_config.settings()
+        if settings.get("enabled"):
+            return await ctx.send("❌ Disable this server first with `rm stop`, then run the purge preview.")
+
+        cache_raw = await guild_config.properties()
+        candidates: List[Tuple[str, Dict[str, Any], int]] = []
+        unknown_price = 0
+        for pid, raw in cache_raw.items():
+            if not isinstance(raw, dict):
+                continue
+            state = self._normalise_cached_state(str(pid), raw)
+            price = _safe_int(state.get("current_price"))
+            if price is None:
+                unknown_price += 1
+                continue
+            if price > maximum_price:
+                candidates.append((str(pid), state, price))
+
+        candidates.sort(key=lambda item: (item[2], item[0]), reverse=True)
+        keyword_ok = (confirmation or "").casefold() == "confirm"
+        if not keyword_ok:
+            if not candidates:
+                return await ctx.send(
+                    f"✅ No tracked properties are priced above £{maximum_price:,}. "
+                    f"{unknown_price} record(s) have no usable cached price and were left untouched."
+                )
+            highest = candidates[0][2]
+            lowest = candidates[-1][2]
+            return await ctx.send(
+                f"⚠️ **Purge preview for this server only**\n"
+                f"Would remove **{len(candidates)}** tracked property record(s) priced above "
+                f"**£{maximum_price:,}** (range £{lowest:,}–£{highest:,}).\n"
+                f"Would leave **{len(cache_raw) - len(candidates)}** tracked record(s), including "
+                f"{unknown_price} with no usable cached price.\n\n"
+                f"Nothing has been deleted. To proceed, run:\n"
+                f"`rm purgeover {maximum_price} confirm`"
+            )
+
+        if not candidates:
+            return await ctx.send(f"✅ Nothing is priced above £{maximum_price:,}; no changes were made.")
+
+        progress = await ctx.send(
+            f"🧹 Purging {len(candidates)} property record(s) above £{maximum_price:,} "
+            "from this server only…"
+        )
+        discovered = self._discover_channels(ctx.guild)
+        cache: Dict[str, Dict[str, Any]] = dict(cache_raw)
+        deleted_channels = 0
+        removed_records = 0
+        missing_channels = 0
+        failures: List[str] = []
+
+        for index, (pid, state, price) in enumerate(candidates, start=1):
+            # Delete every channel positively identified with this property ID.
+            # Prefer discovery by name/topic, while also checking the cached ID.
+            channels: Dict[int, discord.TextChannel] = {
+                channel.id: channel for channel in discovered.get(pid, [])
+            }
+            cached_id = _safe_int(state.get("channel_id"))
+            cached_channel = ctx.guild.get_channel(cached_id) if cached_id else None
+            if isinstance(cached_channel, discord.TextChannel) and _channel_property_id(cached_channel) == pid:
+                channels[cached_channel.id] = cached_channel
+
+            property_failed = False
+            if not channels:
+                missing_channels += 1
+            else:
+                for channel in channels.values():
+                    try:
+                        await channel.delete(
+                            reason=f"Rightmove property price £{price:,} exceeds configured purge limit £{maximum_price:,}"
+                        )
+                        deleted_channels += 1
+                    except discord.NotFound:
+                        pass
+                    except (discord.Forbidden, discord.HTTPException) as exc:
+                        property_failed = True
+                        failures.append(f"prop-{pid}: {exc}")
+
+            # Never remove the cache entry if a positively matched channel could
+            # not be deleted; this keeps the operation recoverable on retry.
+            if not property_failed:
+                cache.pop(pid, None)
+                removed_records += 1
+
+            if index % 10 == 0:
+                await guild_config.properties.set(cache)
+            if index % 25 == 0 or index == len(candidates):
+                try:
+                    await progress.edit(
+                        content=(
+                            f"🧹 Purging properties above £{maximum_price:,}: "
+                            f"**{index}/{len(candidates)}** checked, "
+                            f"**{removed_records}** records removed…"
+                        )
+                    )
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
+
+        await guild_config.properties.set(cache)
+        result = (
+            f"✅ Northern-only purge complete: **{removed_records}** cache record(s) removed and "
+            f"**{deleted_channels}** property channel(s) deleted. "
+            f"**{len(cache)}** tracked record(s) remain at or below £{maximum_price:,}."
+        )
+        if missing_channels:
+            result += f" {missing_channels} removed record(s) already had no channel."
+        if unknown_price:
+            result += f" {unknown_price} record(s) with unknown prices were left untouched."
+        if failures:
+            result += (
+                f" **{len(failures)}** deletion(s) failed and remain cached; retry after checking permissions. "
+                + " | ".join(failures[:3])
+            )
+        await self._log(ctx.guild, result)
+        try:
+            await progress.edit(content=result[:2000])
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            await ctx.send(result[:2000])
 
     @rm.command(name="cleanup")
     async def rm_cleanup(self, ctx: commands.Context) -> None:

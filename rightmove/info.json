@@ -1,8 +1,8 @@
 {
   "name": "rightmove",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "short": "Reliable multi-server Rightmove property monitoring.",
-  "description": "Multi-server Rightmove monitor with per-server drawn-area searches, filters, safe reconciliation, persistent scheduling, reliable embeds, price ordering, and strict highlighting for permanently discounted outright-ownership homes.",
+  "description": "Multi-server Rightmove monitor with per-server drawn-area searches, filters, safe reconciliation, persistent scheduling, reliable embeds, price ordering, and strict highlighting for permanently discounted outright-ownership homes, cancellable live scrapes, and safe per-server price-limit purging.",
   "author": [
     "Five"
   ],
@@ -18,6 +18,6 @@
   ],
   "hidden": false,
   "disabled": false,
-  "install_msg": "After loading, use `[p]rm setup #anchor <full Rightmove search URL>`. Use `[p]rm highlight reset` before setup to mark only First Homes and equivalent permanent-discount outright-ownership listings with a star; shared ownership and temporary incentives are never highlighted.",
+  "install_msg": "After loading, use `[p]rm setup #anchor <full Rightmove search URL>`. Use `[p]rm highlight reset` before setup to mark only First Homes and equivalent permanent-discount outright-ownership listings with a star; shared ownership and temporary incentives are never highlighted. Use `[p]rm purgeover <price>` to preview removal of accidentally imported over-limit properties.",
   "end_user_data_statement": "This cog stores per-server configuration, Rightmove property metadata, Discord channel/message IDs, and scrape state. It does not store end-user personal data."
 }
