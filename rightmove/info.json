@@ -1,8 +1,8 @@
 {
   "name": "rightmove",
-  "version": "2.0.2",
+  "version": "2.1.0",
   "short": "Reliable multi-server Rightmove property monitoring.",
-  "description": "Multi-server Rightmove monitor with drawn-area URLs, per-server filters, safe reconciliation, persistent scheduling, reliable embeds, JSON-model parsing, and two-phase price-ordering of property channels.",
+  "description": "Multi-server Rightmove monitor with per-server drawn-area searches, filters, safe reconciliation, persistent scheduling, reliable embeds, price ordering, and configurable First Homes/affordable-scheme highlighting.",
   "author": [
     "Five"
   ],
@@ -18,6 +18,6 @@
   ],
   "hidden": false,
   "disabled": false,
-  "install_msg": "This cog queries Rightmove. After loading it, use `[p]rm setup #anchor <full Rightmove search URL>`. The anchor channel must be outside categories. Drawn-area polygons and all filters contained in the URL are preserved.",
+  "install_msg": "After loading, use `[p]rm setup #anchor <full Rightmove search URL>`. Use `[p]rm highlight on` before setup to mark First Homes, discounted-sale and first-time-buyer new-home listings with a star.",
   "end_user_data_statement": "This cog stores per-server configuration, Rightmove property metadata, Discord channel/message IDs, and scrape state. It does not store end-user personal data."
 }

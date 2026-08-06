@@ -77,6 +77,73 @@ DEFAULT_BANNED_TEXT = [
     "non standard",
 ]
 
+# Built-in detection is deliberately stricter than a simple keyword list.
+# "Ideal first home" appears on many ordinary resales, so generic first-buyer
+# wording is only highlighted when the same advert also looks like a new home.
+SCHEME_HIGHLIGHT_RULES: Sequence[Tuple[str, re.Pattern[str]]] = (
+    (
+        "First Homes scheme",
+        re.compile(r"\b(?:first\s+homes(?:\s+scheme)?|first\s+home\s+scheme)\b", re.IGNORECASE),
+    ),
+    (
+        "Discount Market Sale",
+        re.compile(
+            r"\b(?:discount(?:ed)?\s+market\s+(?:sale|value)|discounted\s+sale|"
+            r"discount\s+open\s+market\s+value|domv)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "Affordable home ownership",
+        re.compile(
+            r"\b(?:affordable\s+(?:housing(?:\s+(?:scheme|programme|program))?"
+            r"|homes?\s+(?:ownership|scheme|programme|program))"
+            r"|low[\s-]*cost\s+home\s+ownership)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("Section 106 scheme", re.compile(r"\b(?:section\s*106|s106)\b", re.IGNORECASE)),
+    (
+        "Local eligibility restriction",
+        re.compile(
+            r"\blocal\s+(?:connection|occupancy|needs?)"
+            r"(?:\s+(?:criteria|restriction|requirement|scheme|housing))?\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "Below-market purchase",
+        re.compile(
+            r"\b(?:below\s+market\s+(?:value|price)|"
+            r"(?:5\d|6\d|7\d|8\d|90)\s*%\s+(?:of\s+)?(?:the\s+)?(?:open\s+)?market\s+value|"
+            r"(?:1\d|2\d|3\d|4\d|50)\s*%\s+(?:off|discount))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("Shared-equity assistance", re.compile(r"\b(?:shared\s+equity|equity\s+loan)\b", re.IGNORECASE)),
+    (
+        "Key-worker scheme",
+        re.compile(r"\bkey\s+worker(?:s)?\s+(?:scheme|discount|criteria)\b", re.IGNORECASE),
+    ),
+)
+
+FIRST_BUYER_RE = re.compile(r"\bfirst[\s-]*time\s+buyer(?:s)?\b", re.IGNORECASE)
+NEW_HOME_SIGNAL_RE = re.compile(
+    r"\b(?:new[\s-]*(?:build|home|homes)|brand[\s-]*new|"
+    r"new\s+development|housebuilder|homebuilder|show\s+home|"
+    r"reserve\s+(?:this|your)|plot\s+\d+)\b",
+    re.IGNORECASE,
+)
+EXPLICIT_FIRST_BUYER_INCENTIVE_RE = re.compile(
+    r"\bfirst[\s-]*time\s+buyer(?:s)?\s+(?:scheme|incentive|offer)\b",
+    re.IGNORECASE,
+)
+NEW_HOME_INCENTIVE_RE = re.compile(
+    r"\b(?:deposit\s+contribution|mortgage\s+contribution|"
+    r"stamp\s+duty\s+(?:paid|contribution)|\d+\s*%\s+deposit\s+paid)\b",
+    re.IGNORECASE,
+)
+
 DEFAULT_GUILD = {
     "settings": {
         "enabled": False,
@@ -94,6 +161,9 @@ DEFAULT_GUILD = {
         "exclude_locations": [],
         "banned_property_types": DEFAULT_BANNED_PROPERTY_TYPES,
         "banned_text": DEFAULT_BANNED_TEXT,
+        "scheme_highlight_enabled": False,
+        "scheme_highlight_emoji": "⭐",
+        "scheme_highlight_terms": [],
         "last_attempt_ts": None,
         "last_success_ts": None,
         # Keep this a scalar Config Value. Earlier versions registered this
@@ -306,9 +376,24 @@ def _tier_for_price(price: Any, settings: Dict[str, Any]) -> Tuple[str, discord.
     return "🔴", discord.Color.red()
 
 
-def _desired_channel_name(pid: str, price: Any, settings: Dict[str, Any]) -> str:
-    emoji, _ = _tier_for_price(price, settings)
-    return f"prop-{pid}-{emoji}"[:100]
+def _highlight_emoji(settings: Dict[str, Any]) -> str:
+    value = _normalise_space(settings.get("scheme_highlight_emoji")) or "⭐"
+    # Discord channel names have a 100-character cap. Keep this marker compact
+    # and remove separators that would make property IDs harder to recover.
+    value = re.sub(r"[\s/#]+", "", value)
+    return value[:8] or "⭐"
+
+
+def _desired_channel_name(
+    pid: str,
+    price: Any,
+    settings: Dict[str, Any],
+    *,
+    highlighted: bool = False,
+) -> str:
+    price_emoji, _ = _tier_for_price(price, settings)
+    scheme_suffix = f"-{_highlight_emoji(settings)}" if highlighted else ""
+    return f"prop-{pid}-{price_emoji}{scheme_suffix}"[:100]
 
 
 def _property_topic(pid: str, url: Optional[str], profile_name: str) -> str:
@@ -1334,6 +1419,7 @@ class RightmoveCog(commands.Cog):
             "agent": _normalise_space(raw.get("agent")) or None,
             "agent_url": raw.get("agent_url"),
             "description": _normalise_space(raw.get("description")),
+            "filter_text": _normalise_space(raw.get("filter_text")) or _normalise_space(raw.get("description")),
             "current_price": current_price,
             "original_price": original_price,
             "previous_price": _safe_int(raw.get("previous_price")),
@@ -1345,6 +1431,12 @@ class RightmoveCog(commands.Cog):
             "last_seen_ts": _valid_timestamp(raw.get("last_seen_ts")),
             "last_changed_ts": _valid_timestamp(raw.get("last_changed_ts")),
             "is_stc": bool(raw.get("is_stc", False)),
+            "scheme_highlighted": bool(raw.get("scheme_highlighted", False)),
+            "scheme_matches": [
+                _normalise_space(item)
+                for item in (raw.get("scheme_matches") if isinstance(raw.get("scheme_matches"), list) else [])
+                if _normalise_space(item)
+            ][:12],
             "fingerprint": raw.get("fingerprint"),
             "missing_count": max(0, _safe_int(raw.get("missing_count")) or 0),
             "active": bool(raw.get("active", True)),
@@ -1420,6 +1512,63 @@ class RightmoveCog(commands.Cog):
 
         return None
 
+    @staticmethod
+    def _scheme_highlight_matches(
+        row: Dict[str, Any],
+        settings: Dict[str, Any],
+        details_filter_text: str = "",
+    ) -> List[str]:
+        """Return human-readable reasons for adding the scheme star.
+
+        Detection examines the search card and the full property page. Explicit
+        affordable-sale terminology is highlighted directly. Generic first-time
+        buyer wording only qualifies when the advert also contains a new-home
+        signal, avoiding ordinary resales described merely as an "ideal first
+        home".
+        """
+        if not bool(settings.get("scheme_highlight_enabled", False)):
+            return []
+
+        combined = _normalise_space(
+            " ".join(
+                [
+                    _normalise_space(row.get("address")),
+                    _normalise_space(row.get("type")),
+                    _normalise_space(row.get("card_text")),
+                    _normalise_space(row.get("summary")),
+                    _normalise_space(details_filter_text),
+                ]
+            )
+        )
+        matches: List[str] = []
+
+        for label, pattern in SCHEME_HIGHLIGHT_RULES:
+            if pattern.search(combined):
+                matches.append(label)
+
+        if EXPLICIT_FIRST_BUYER_INCENTIVE_RE.search(combined):
+            matches.append("First-time buyer incentive")
+        elif FIRST_BUYER_RE.search(combined) and NEW_HOME_SIGNAL_RE.search(combined):
+            matches.append("First-time buyer new home")
+
+        if NEW_HOME_SIGNAL_RE.search(combined) and NEW_HOME_INCENTIVE_RE.search(combined):
+            matches.append("New-home buyer incentive")
+
+        for phrase in settings.get("scheme_highlight_terms", []):
+            phrase = _normalise_space(phrase)
+            if phrase and _matches_phrase(combined, phrase):
+                matches.append(f"Custom: {phrase}")
+
+        unique: List[str] = []
+        seen: set[str] = set()
+        for item in matches:
+            key = item.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique[:12]
+
     async def _details_for_candidate(
         self,
         row: Dict[str, Any],
@@ -1430,10 +1579,12 @@ class RightmoveCog(commands.Cog):
     ) -> Dict[str, str]:
         fingerprint = row.get("fingerprint")
         if not force_refresh:
-            if old_state and old_state.get("fingerprint") == fingerprint and old_state.get("description"):
+            if old_state and old_state.get("fingerprint") == fingerprint and (
+                old_state.get("description") or old_state.get("filter_text")
+            ):
                 return {
                     "description": old_state.get("description", ""),
-                    "filter_text": old_state.get("description", ""),
+                    "filter_text": old_state.get("filter_text") or old_state.get("description", ""),
                 }
             if ignored_state and ignored_state.get("fingerprint") == fingerprint:
                 return {
@@ -1492,6 +1643,17 @@ class RightmoveCog(commands.Cog):
         )
         price_changed = old_price is not None and new_price is not None and old_price != new_price
         status_changed = old_stc != new_stc
+        old_scheme_matches = [
+            _normalise_space(item)
+            for item in (old.get("scheme_matches") if isinstance(old.get("scheme_matches"), list) else [])
+            if _normalise_space(item)
+        ]
+        new_scheme_matches = [
+            _normalise_space(item)
+            for item in (details.get("scheme_matches") if isinstance(details.get("scheme_matches"), list) else [])
+            if _normalise_space(item)
+        ]
+        scheme_changed = old_scheme_matches != new_scheme_matches
 
         if is_new:
             event = "new"
@@ -1503,6 +1665,8 @@ class RightmoveCog(commands.Cog):
             event = "price_reduced"
         elif price_changed and new_price > old_price:
             event = "price_increased"
+        elif scheme_changed:
+            event = "highlight_updated"
         elif fingerprint_changed:
             event = "details_updated"
         else:
@@ -1510,6 +1674,7 @@ class RightmoveCog(commands.Cog):
 
         changed = event != "unchanged"
         description = _normalise_space(details.get("description")) or old.get("description") or ""
+        filter_text = _normalise_space(details.get("filter_text")) or old.get("filter_text") or description
 
         state = {
             "id": pid,
@@ -1523,6 +1688,7 @@ class RightmoveCog(commands.Cog):
             "agent": _normalise_space(row.get("agent")) or None,
             "agent_url": row.get("agent_url"),
             "description": description,
+            "filter_text": filter_text,
             "current_price": new_price,
             "original_price": original_price,
             "previous_price": old_price if price_changed else old.get("previous_price"),
@@ -1534,6 +1700,8 @@ class RightmoveCog(commands.Cog):
             "last_seen_ts": now,
             "last_changed_ts": now if changed else _valid_timestamp(old.get("last_changed_ts")),
             "is_stc": new_stc,
+            "scheme_highlighted": bool(new_scheme_matches),
+            "scheme_matches": new_scheme_matches,
             "fingerprint": row.get("fingerprint"),
             "missing_count": 0,
             "active": True,
@@ -1553,6 +1721,7 @@ class RightmoveCog(commands.Cog):
             "price_increased": ("📈", "Price Increased"),
             "stc": ("💖", "Sold STC"),
             "returned": ("↩️", "Returned to Market"),
+            "highlight_updated": ("⭐", "Scheme Highlight Updated"),
             "details_updated": ("✏️", "Listing Updated"),
             "refresh": ("🏠", "Property Listing"),
             "unchanged": ("🏠", "Property Listing"),
@@ -1593,6 +1762,15 @@ class RightmoveCog(commands.Cog):
         embed.add_field(name="🛏 Bedrooms", value=bedroom_value, inline=True)
         embed.add_field(name="🏠 Type", value=state.get("type") or "Unknown", inline=True)
         embed.add_field(name="📌 Status", value="Sold STC" if state.get("is_stc") else "Available", inline=True)
+
+        scheme_matches = state.get("scheme_matches") if isinstance(state.get("scheme_matches"), list) else []
+        if state.get("scheme_highlighted") and scheme_matches:
+            marker = _highlight_emoji(settings)
+            embed.add_field(
+                name=f"{marker} Buyer / Affordable Scheme",
+                value=_truncate("\n".join(f"• {item}" for item in scheme_matches), 1024),
+                inline=False,
+            )
 
         embed.add_field(
             name="📅 Listed",
@@ -1672,7 +1850,12 @@ class RightmoveCog(commands.Cog):
         created_channel = False
         if channel is None:
             channel = await guild.create_text_channel(
-                _desired_channel_name(pid, state.get("current_price"), settings),
+                _desired_channel_name(
+                    pid,
+                    state.get("current_price"),
+                    settings,
+                    highlighted=bool(state.get("scheme_highlighted")),
+                ),
                 topic=_property_topic(pid, state.get("url"), settings.get("profile_name", "Rightmove")),
                 overwrites=anchor.overwrites,
                 reason=f"Rightmove property {pid}",
@@ -1681,7 +1864,12 @@ class RightmoveCog(commands.Cog):
             created_channel = True
 
         state["channel_id"] = channel.id
-        desired_name = _desired_channel_name(pid, state.get("current_price"), settings)
+        desired_name = _desired_channel_name(
+            pid,
+            state.get("current_price"),
+            settings,
+            highlighted=bool(state.get("scheme_highlighted")),
+        )
         desired_topic = _property_topic(pid, state.get("url"), settings.get("profile_name", "Rightmove"))
         channel_needs_edit = channel.name != desired_name or channel.topic != desired_topic
         if channel_needs_edit:
@@ -1953,6 +2141,11 @@ class RightmoveCog(commands.Cog):
                         newly_ignored += 1
                         continue
 
+                    details["scheme_matches"] = self._scheme_highlight_matches(
+                        row,
+                        settings,
+                        details.get("filter_text", ""),
+                    )
                     ignored.pop(pid, None)
                     accepted[pid] = (row, details)
 
@@ -2059,6 +2252,10 @@ class RightmoveCog(commands.Cog):
                     "removed": removed,
                     "moved": moved,
                     "ignored": newly_ignored,
+                    "highlighted": sum(
+                        1 for state in cache.values()
+                        if isinstance(state, dict) and state.get("scheme_highlighted")
+                    ),
                     "errors": errors[-10:],
                 })
                 await guild_config.settings.set(settings)
@@ -2066,7 +2263,8 @@ class RightmoveCog(commands.Cog):
                 summary = (
                     f"Scrape complete for **{settings.get('profile_name', 'Rightmove')}**: "
                     f"{len(accepted)} accepted, {created} created, {updated} updated, "
-                    f"{unchanged} unchanged, {removed} removed, {moved} moved. "
+                    f"{unchanged} unchanged, {removed} removed, {moved} moved, "
+                    f"{sum(1 for state in cache.values() if isinstance(state, dict) and state.get('scheme_highlighted'))} highlighted. "
                     f"Rightmove parse complete: **{scrape.complete}**."
                 )
                 if scrape.errors:
@@ -2310,6 +2508,19 @@ class RightmoveCog(commands.Cog):
             value=_format_discord_time(settings.get("last_success_ts"), fallback="Never"),
             inline=True,
         )
+        highlighted_count = sum(
+            1 for state in properties.values()
+            if isinstance(state, dict) and state.get("scheme_highlighted")
+        )
+        embed.add_field(
+            name="Scheme highlighting",
+            value=(
+                f"{_highlight_emoji(settings)} Enabled • {highlighted_count} highlighted"
+                if settings.get("scheme_highlight_enabled")
+                else "Disabled"
+            ),
+            inline=True,
+        )
         include = settings.get("include_locations", [])
         exclude = settings.get("exclude_locations", [])
         embed.add_field(
@@ -2404,6 +2615,114 @@ class RightmoveCog(commands.Cog):
     async def rm_include_clear(self, ctx: commands.Context) -> None:
         await self.config.guild(ctx.guild).settings.set_raw("include_locations", value=[])
         await ctx.send("✅ Cleared required locations; the drawn Rightmove area is now trusted by itself.")
+
+    @rm.group(name="highlight", invoke_without_command=True)
+    async def rm_highlight(self, ctx: commands.Context) -> None:
+        """Highlight First Homes, discounted-sale and first-buyer new homes."""
+        await ctx.send_help(ctx.command)
+
+    @rm_highlight.command(name="status", aliases=["list"])
+    async def rm_highlight_status(self, ctx: commands.Context) -> None:
+        settings = await self.config.guild(ctx.guild).settings()
+        enabled = bool(settings.get("scheme_highlight_enabled", False))
+        emoji = _highlight_emoji(settings)
+        custom = [
+            _normalise_space(item)
+            for item in settings.get("scheme_highlight_terms", [])
+            if _normalise_space(item)
+        ]
+        lines = [
+            f"**Scheme highlighting:** {'Enabled' if enabled else 'Disabled'}",
+            f"**Channel marker:** {emoji}",
+            "**Built-in detection:** First Homes; Discount/Discounted Market Sale; DOMV; affordable or low-cost home ownership; Section 106/S106; local connection/occupancy/needs restrictions; below-market percentage sales; shared equity/equity loan; key-worker schemes; first-time-buyer new-home wording and buyer incentives.",
+            "**Custom phrases:**",
+            *(f"• {item}" for item in custom),
+        ]
+        if not custom:
+            lines.append("None")
+        for chunk in _chunk_lines(lines):
+            await ctx.send(chunk)
+
+    @rm_highlight.command(name="on", aliases=["enable"])
+    async def rm_highlight_on(self, ctx: commands.Context) -> None:
+        await self.config.guild(ctx.guild).settings.set_raw("scheme_highlight_enabled", value=True)
+        await ctx.send(
+            "✅ Scheme highlighting enabled for this server. "
+            "Run `.rm run refresh` after setup to scan existing listings and add stars."
+        )
+
+    @rm_highlight.command(name="off", aliases=["disable"])
+    async def rm_highlight_off(self, ctx: commands.Context) -> None:
+        await self.config.guild(ctx.guild).settings.set_raw("scheme_highlight_enabled", value=False)
+        await ctx.send(
+            "✅ Scheme highlighting disabled for this server. "
+            "Run `.rm run refresh` to remove existing star markers."
+        )
+
+    @rm_highlight.command(name="emoji")
+    async def rm_highlight_emoji(self, ctx: commands.Context, *, marker: str) -> None:
+        marker = re.sub(r"[\s/#]+", "", _normalise_space(marker))[:8]
+        if not marker:
+            return await ctx.send("❌ Supply a short marker, for example `⭐`.")
+        await self.config.guild(ctx.guild).settings.set_raw("scheme_highlight_emoji", value=marker)
+        await ctx.send(
+            f"✅ Scheme-highlighted channels will use **{marker}**. "
+            "Run `.rm run refresh` to rename existing highlighted channels."
+        )
+
+    @rm_highlight.command(name="add")
+    async def rm_highlight_add(self, ctx: commands.Context, *, phrase: str) -> None:
+        phrase = _normalise_space(phrase)
+        if not phrase:
+            return await ctx.send("❌ Supply a phrase to highlight.")
+        settings = await self.config.guild(ctx.guild).settings()
+        values = list(settings.get("scheme_highlight_terms", []))
+        if any(_normalise_match_text(item) == _normalise_match_text(phrase) for item in values):
+            return await ctx.send("❌ That custom highlight phrase already exists.")
+        values.append(phrase)
+        settings["scheme_highlight_terms"] = values
+        await self.config.guild(ctx.guild).settings.set(settings)
+        await ctx.send(
+            f"✅ Added **{phrase}** as a custom scheme-highlight phrase. "
+            "Run `.rm run refresh` to rescan existing listings."
+        )
+
+    @rm_highlight.command(name="remove")
+    async def rm_highlight_remove(self, ctx: commands.Context, *, phrase: str) -> None:
+        settings = await self.config.guild(ctx.guild).settings()
+        values = list(settings.get("scheme_highlight_terms", []))
+        new_values = [
+            item for item in values
+            if _normalise_match_text(item) != _normalise_match_text(phrase)
+        ]
+        if len(new_values) == len(values):
+            return await ctx.send("❌ That custom highlight phrase was not found.")
+        settings["scheme_highlight_terms"] = new_values
+        await self.config.guild(ctx.guild).settings.set(settings)
+        await ctx.send(
+            f"✅ Removed **{phrase}** from custom scheme highlighting. "
+            "Run `.rm run refresh` to update existing listings."
+        )
+
+    @rm_highlight.command(name="clear")
+    async def rm_highlight_clear(self, ctx: commands.Context) -> None:
+        await self.config.guild(ctx.guild).settings.set_raw("scheme_highlight_terms", value=[])
+        await ctx.send(
+            "✅ Cleared custom phrases; built-in scheme detection remains available. "
+            "Run `.rm run refresh` to update existing listings."
+        )
+
+    @rm_highlight.command(name="reset")
+    async def rm_highlight_reset(self, ctx: commands.Context) -> None:
+        settings = await self.config.guild(ctx.guild).settings()
+        settings["scheme_highlight_enabled"] = True
+        settings["scheme_highlight_emoji"] = "⭐"
+        settings["scheme_highlight_terms"] = []
+        await self.config.guild(ctx.guild).settings.set(settings)
+        await ctx.send(
+            "✅ Scheme highlighting reset to the built-in rules with the ⭐ marker. "
+            "Run `.rm run refresh` to update existing listings."
+        )
 
     @rm.group(name="filter", invoke_without_command=True)
     async def rm_filter(self, ctx: commands.Context) -> None:
