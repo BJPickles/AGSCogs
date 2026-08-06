@@ -11,7 +11,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import discord
@@ -585,6 +585,12 @@ class RightmoveClient:
 
     @staticmethod
     def _normalise_image_url(value: Any, base: str = "https://www.rightmove.co.uk") -> Optional[str]:
+        """Return a Discord-fetchable property image URL.
+
+        Rightmove commonly wraps card images in an image-optimiser URL such as
+        ``/_next/image?url=https%3A%2F%2Fmedia.rightmove...``. Unwrap the proxy
+        before validating the actual property image.
+        """
         text = _normalise_space(value)
         if not text:
             return None
@@ -593,11 +599,30 @@ class RightmoveClient:
             return None
         if text.startswith("//"):
             text = "https:" + text
+
         candidate = urljoin(base, text)
         try:
             parts = urlsplit(candidate)
         except ValueError:
             return None
+
+        query_items = dict(parse_qsl(parts.query, keep_blank_values=True))
+        wrapped = query_items.get("url") or query_items.get("image") or query_items.get("src")
+        if wrapped and (
+            parts.path.casefold().endswith("/_next/image")
+            or "image" in parts.path.casefold()
+            or "proxy" in parts.path.casefold()
+        ):
+            decoded = wrapped
+            for _ in range(3):
+                newer = html_unescape(unquote(decoded)).replace("\\u002F", "/").replace("\\/", "/")
+                if newer == decoded:
+                    break
+                decoded = newer
+            nested = RightmoveClient._normalise_image_url(decoded, base)
+            if nested:
+                return nested
+
         host = (parts.hostname or "").casefold()
         path = parts.path.casefold()
         if parts.scheme not in {"http", "https"}:
@@ -606,7 +631,16 @@ class RightmoveClient:
             r"\.(?:jpe?g|png|webp)(?:$|\?)", candidate, re.IGNORECASE
         ):
             return None
-        if any(marker in path for marker in ("property-location-marker", "/map/", "estate-agent-logo")):
+        if any(
+            marker in path
+            for marker in (
+                "property-location-marker",
+                "/map/",
+                "estate-agent-logo",
+                "branch_rmchoice_logo",
+                "clogo_",
+            )
+        ):
             return None
         return candidate
 
@@ -692,12 +726,41 @@ class RightmoveClient:
 
         source_values = card.xpath(
             ".//img/@src | .//img/@data-src | .//img/@data-original | "
-            ".//source/@src | .//source/@data-src"
+            ".//img/@data-lazy-src | .//source/@src | .//source/@data-src | "
+            ".//*[@data-image]/@data-image | .//*[@data-background-image]/@data-background-image"
         )
         for value in source_values:
             image_url = cls._normalise_image_url(value, base)
             if image_url:
                 return image_url
+
+        for style in card.xpath(".//*[@style]/@style"):
+            for raw_url in re.findall(r"url\((?:['\"])?([^)'\"]+)", str(style), re.IGNORECASE):
+                image_url = cls._normalise_image_url(raw_url, base)
+                if image_url:
+                    return image_url
+
+        # Last resort for current lazy-loaded/optimised card markup: inspect
+        # attribute values for direct or percent-encoded Rightmove media links.
+        for element in card.iterdescendants():
+            for value in element.attrib.values():
+                text = str(value)
+                folded = text.casefold()
+                if "media.rightmove" not in folded and "%2f%2fmedia.rightmove" not in folded:
+                    continue
+                image_url = cls._normalise_image_url(text, base)
+                if image_url:
+                    return image_url
+                decoded = html_unescape(unquote(text))
+                match = re.search(
+                    r"https?://media\.rightmove\.co\.uk[^\s'\"<>]+",
+                    decoded,
+                    re.IGNORECASE,
+                )
+                if match:
+                    image_url = cls._normalise_image_url(match.group(0).rstrip("),]"), base)
+                    if image_url:
+                        return image_url
         return None
 
     @classmethod
@@ -716,7 +779,10 @@ class RightmoveClient:
             if image_url:
                 return image_url
 
-        for script_text in tree.xpath("//script[@type='application/ld+json']/text()"):
+        # Gallery data may be in JSON-LD, application/json, or __NEXT_DATA__.
+        for script_text in tree.xpath(
+            "//script[@type='application/ld+json' or @type='application/json' or @id='__NEXT_DATA__']/text()"
+        ):
             try:
                 payload = json.loads(script_text)
             except (json.JSONDecodeError, TypeError):
@@ -727,12 +793,31 @@ class RightmoveClient:
 
         decoded = content.decode("utf-8", errors="ignore")
         decoded = html_unescape(decoded).replace("\\u002F", "/").replace("\\/", "/")
+
         for match in re.findall(
             r"https?://media\.rightmove\.co\.uk[^\"'<>\s]+",
             decoded,
             flags=re.IGNORECASE,
         ):
             image_url = cls._normalise_image_url(match.rstrip("),]"), base)
+            if image_url:
+                return image_url
+
+        for match in re.findall(
+            r"https?%3A%2F%2Fmedia\.rightmove\.co\.uk[^\"'<>\s&]+",
+            decoded,
+            flags=re.IGNORECASE,
+        ):
+            image_url = cls._normalise_image_url(unquote(match).rstrip("),]"), base)
+            if image_url:
+                return image_url
+
+        for match in re.findall(
+            r"(?:https?://www\.rightmove\.co\.uk)?/_next/image\?[^\"'<>\s]+",
+            decoded,
+            flags=re.IGNORECASE,
+        ):
+            image_url = cls._normalise_image_url(match, base)
             if image_url:
                 return image_url
         return None
@@ -1949,7 +2034,7 @@ class RightmoveCog(commands.Cog):
             embed.url = state["url"]
 
         if state.get("image_url"):
-            embed.set_image(url=state["image_url"])
+            embed.set_thumbnail(url=state["image_url"])
 
         current_price = _safe_int(state.get("current_price"))
         original_price = _safe_int(state.get("original_price"))

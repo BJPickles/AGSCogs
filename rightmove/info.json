@@ -1,8 +1,8 @@
 {
   "name": "rightmove",
-  "version": "2.1.3",
+  "version": "2.1.4",
   "short": "Reliable multi-server Rightmove property monitoring.",
-  "description": "Multi-server Rightmove monitor with per-server drawn-area searches, filters, safe reconciliation, persistent scheduling, reliable embeds and image recovery, price ordering, strict highlighting for permanently discounted outright-ownership homes including LCHO/RSL, cancellable live scrapes, and safe per-server price-limit purging.",
+  "description": "Multi-server Rightmove monitor with per-server drawn-area searches, filters, safe reconciliation, persistent scheduling, reliable embeds and thumbnail recovery for proxied Rightmove images, price ordering, strict highlighting for permanently discounted outright-ownership homes including LCHO/RSL, cancellable live scrapes, and safe per-server price-limit purging.",
   "author": [
     "Five"
   ],
@@ -18,6 +18,6 @@
   ],
   "hidden": false,
   "disabled": false,
-  "install_msg": "After loading, use `[p]rm setup #anchor <full Rightmove search URL>`. For a profile that should include permanent-discount LCHO/RSL homes hidden by Rightmove’s broad shared-ownership bucket, run `[p]rm affordable on`; genuine shared ownership, shared equity, rent-on-remainder and leasehold listings remain blocked by the cog. Use `[p]rm highlight reset` to mark permanent-discount ownership homes with a star. Use `[p]rm run refresh` to repair existing embed images.",
+  "install_msg": "After loading, use `[p]rm setup #anchor <full Rightmove search URL>`. For a profile that should include permanent-discount LCHO/RSL homes hidden by Rightmove’s broad shared-ownership bucket, run `[p]rm affordable on`; genuine shared ownership, shared equity, rent-on-remainder and leasehold listings remain blocked by the cog. Use `[p]rm highlight reset` to mark permanent-discount ownership homes with a star. Use `[p]rm run refresh` to repair existing embed thumbnails.",
   "end_user_data_statement": "This cog stores per-server configuration, Rightmove property metadata, Discord channel/message IDs, and scrape state. It does not store end-user personal data."
 }
