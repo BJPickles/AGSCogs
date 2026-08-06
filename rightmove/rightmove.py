@@ -480,6 +480,283 @@ class RightmoveClient:
         return kind, int(parsed.timestamp())
 
     @staticmethod
+    def _extract_json_model(tree: html.HtmlElement) -> Optional[Dict[str, Any]]:
+        """Extract Rightmove's embedded ``window.jsonModel`` payload when present.
+
+        The JSON payload is substantially more stable than presentation CSS classes
+        and, importantly, includes promoted cards that can use different HTML markup.
+        """
+        decoder = json.JSONDecoder()
+        for script in tree.xpath("//script/text()"):
+            if not isinstance(script, str) or "window.jsonModel" not in script:
+                continue
+            marker = "window.jsonModel"
+            marker_index = script.find(marker)
+            equals_index = script.find("=", marker_index + len(marker))
+            if equals_index < 0:
+                continue
+            candidate = script[equals_index + 1 :].lstrip()
+            try:
+                model, _ = decoder.raw_decode(candidate)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(model, dict):
+                return model
+        return None
+
+    @staticmethod
+    def _find_property_list(model: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Find the most plausible property list inside a Rightmove JSON model."""
+        candidates: List[List[Dict[str, Any]]] = []
+
+        def walk(value: Any, depth: int = 0) -> None:
+            if depth > 6:
+                return
+            if isinstance(value, dict):
+                for key, nested in value.items():
+                    if (
+                        key in {"properties", "propertyResults", "results"}
+                        and isinstance(nested, list)
+                    ):
+                        dict_items = [item for item in nested if isinstance(item, dict)]
+                        if dict_items and any(
+                            item.get("id") is not None
+                            or item.get("propertyId") is not None
+                            or item.get("propertyUrl")
+                            for item in dict_items
+                        ):
+                            candidates.append(dict_items)
+                    if isinstance(nested, (dict, list)):
+                        walk(nested, depth + 1)
+            elif isinstance(value, list):
+                for nested in value:
+                    if isinstance(nested, (dict, list)):
+                        walk(nested, depth + 1)
+
+        walk(model)
+        return max(candidates, key=len) if candidates else []
+
+    @staticmethod
+    def _json_expected_count(model: Dict[str, Any]) -> Optional[int]:
+        preferred_keys = ("resultCount", "totalResults", "totalResultCount")
+
+        def walk(value: Any, depth: int = 0) -> Optional[int]:
+            if depth > 6:
+                return None
+            if isinstance(value, dict):
+                for key in preferred_keys:
+                    candidate = _safe_int(value.get(key))
+                    if candidate is not None and candidate >= 0:
+                        return candidate
+                for nested in value.values():
+                    if isinstance(nested, (dict, list)):
+                        found = walk(nested, depth + 1)
+                        if found is not None:
+                            return found
+            elif isinstance(value, list):
+                for nested in value:
+                    if isinstance(nested, (dict, list)):
+                        found = walk(nested, depth + 1)
+                        if found is not None:
+                            return found
+            return None
+
+        return walk(model)
+
+    @staticmethod
+    def _parse_iso_timestamp(value: Any) -> Optional[int]:
+        text = _normalise_space(value)
+        if not text:
+            return None
+        try:
+            parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=LONDON)
+        return int(parsed.timestamp())
+
+    @classmethod
+    def _parse_json_cards(
+        cls,
+        model: Dict[str, Any],
+    ) -> Tuple[List[PropertyCard], int, bool, Optional[int]]:
+        raw_properties = cls._find_property_list(model)
+        expected = cls._json_expected_count(model)
+        parsed: List[PropertyCard] = []
+        parse_loss = False
+        base = "https://www.rightmove.co.uk"
+
+        for item in raw_properties:
+            property_id_raw = item.get("id", item.get("propertyId"))
+            property_id = str(property_id_raw).strip() if property_id_raw is not None else ""
+
+            property_url_raw = item.get("propertyUrl") or item.get("url")
+            property_url = urljoin(base, property_url_raw) if property_url_raw else None
+            if not property_id and property_url:
+                match = re.search(r"/properties/(\d+)", property_url)
+                property_id = match.group(1) if match else ""
+            if property_id and not property_url:
+                property_url = f"{base}/properties/{property_id}"
+
+            price_obj = item.get("price")
+            price: Optional[int] = None
+            if isinstance(price_obj, dict):
+                price = _safe_int(price_obj.get("amount"))
+                if price is None:
+                    display_prices = price_obj.get("displayPrices")
+                    if isinstance(display_prices, list):
+                        for display in display_prices:
+                            if not isinstance(display, dict):
+                                continue
+                            price = cls._parse_price(
+                                display.get("displayPrice")
+                                or display.get("displayPriceQualifier")
+                            )
+                            if price is not None:
+                                break
+                if price is None:
+                    price = cls._parse_price(json.dumps(price_obj, ensure_ascii=False))
+            else:
+                price = _safe_int(price_obj) or cls._parse_price(str(price_obj or ""))
+
+            address = _normalise_space(
+                item.get("displayAddress")
+                or item.get("address")
+                or item.get("propertyAddress")
+            )
+            property_type = _normalise_space(
+                item.get("propertySubType")
+                or item.get("propertyTypeFullDescription")
+                or item.get("propertyType")
+            ) or None
+            bedrooms = _safe_float(item.get("bedrooms", item.get("numberOfBedrooms")))
+
+            marketed_text = _normalise_space(
+                item.get("addedOrReduced")
+                or item.get("marketedText")
+                or item.get("firstVisibleDate")
+            ) or None
+            market_kind, market_ts = cls._parse_marketed_text(marketed_text)
+            if market_ts is None:
+                market_ts = cls._parse_iso_timestamp(
+                    item.get("firstVisibleDate") or item.get("listingUpdateDate")
+                )
+
+            status_text = _normalise_match_text(
+                " ".join(
+                    str(item.get(key) or "")
+                    for key in (
+                        "displayStatus",
+                        "displayStatusId",
+                        "status",
+                        "propertySubType",
+                    )
+                )
+            )
+            is_stc = any(
+                phrase in status_text
+                for phrase in ("sold stc", "sstc", "subject to contract", "under offer")
+            )
+
+            images = item.get("propertyImages")
+            image_url: Optional[str] = None
+            if isinstance(images, dict):
+                image_url = (
+                    images.get("mainImageSrc")
+                    or images.get("mainImage")
+                    or images.get("mainImageUrl")
+                )
+                image_list = images.get("images")
+                if not image_url and isinstance(image_list, list) and image_list:
+                    first_image = image_list[0]
+                    if isinstance(first_image, dict):
+                        image_url = (
+                            first_image.get("srcUrl")
+                            or first_image.get("url")
+                            or first_image.get("src")
+                        )
+            if image_url:
+                image_url = urljoin(base, str(image_url))
+
+            customer = item.get("customer") if isinstance(item.get("customer"), dict) else {}
+            agent = _normalise_space(
+                customer.get("branchDisplayName")
+                or customer.get("companyName")
+                or item.get("branchDisplayName")
+            ) or None
+            agent_url_raw = customer.get("branchDetailsUri") or item.get("branchDetailsUri")
+            agent_url = urljoin(base, agent_url_raw) if agent_url_raw else None
+
+            summary = _normalise_space(
+                item.get("summary")
+                or item.get("propertyDescription")
+                or item.get("description")
+            )
+
+            # A listing ID, URL and price are enough to retain the property safely.
+            # Some promoted cards omit the normal address element; give those a
+            # stable fallback rather than treating the whole page as corrupt.
+            if not property_id or price is None or not property_url:
+                parse_loss = True
+                continue
+            if not address:
+                address = f"Rightmove property {property_id}"
+
+            card_text = _normalise_space(
+                " ".join(
+                    value
+                    for value in (
+                        address,
+                        property_type or "",
+                        marketed_text or "",
+                        summary,
+                        status_text,
+                    )
+                    if value
+                )
+            )
+            canonical = {
+                "id": property_id,
+                "price": price,
+                "address": address,
+                "type": property_type,
+                "bedrooms": bedrooms,
+                "marketed_text": marketed_text,
+                "is_stc": is_stc,
+                "url": property_url,
+                "image_url": image_url,
+                "agent": agent,
+                "summary": summary,
+            }
+            fingerprint = hashlib.sha256(
+                json.dumps(canonical, sort_keys=True, ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
+
+            parsed.append(
+                PropertyCard(
+                    property_id=property_id,
+                    price=price,
+                    address=address,
+                    property_type=property_type,
+                    bedrooms=bedrooms,
+                    marketed_text=marketed_text,
+                    market_kind=market_kind,
+                    market_ts=market_ts,
+                    is_stc=is_stc,
+                    url=property_url,
+                    image_url=image_url,
+                    agent=agent,
+                    agent_url=agent_url,
+                    summary=summary,
+                    card_text=card_text,
+                    fingerprint=fingerprint,
+                )
+            )
+
+        return parsed, len(raw_properties), parse_loss, expected
+
+    @staticmethod
     def _first_text(node: html.HtmlElement, xpaths: Sequence[str]) -> Optional[str]:
         for xpath in xpaths:
             values = node.xpath(xpath)
@@ -503,6 +780,19 @@ class RightmoveClient:
 
         expected = cls._expected_count(tree)
         explicit_zero = cls._explicit_zero_state(tree)
+
+        json_model = cls._extract_json_model(tree)
+        if json_model is not None:
+            json_cards, json_raw_count, json_parse_loss, json_expected = cls._parse_json_cards(json_model)
+            if json_raw_count:
+                return (
+                    json_cards,
+                    json_raw_count,
+                    json_parse_loss,
+                    json_expected if json_expected is not None else expected,
+                    explicit_zero,
+                )
+
         parsed: List[PropertyCard] = []
         parse_loss = False
         base = "https://www.rightmove.co.uk"
@@ -523,7 +813,9 @@ class RightmoveClient:
                 card,
                 (
                     ".//*[@data-testid='property-address']//text()",
+                    ".//*[contains(@class,'PropertyAddress_address')]//text()",
                     ".//address//text()",
+                    ".//a[contains(@href,'/properties/')]//h2//text()",
                 ),
             )
 
@@ -611,9 +903,11 @@ class RightmoveClient:
                 for phrase in ("sold stc", "sstc", "subject to contract", "under offer")
             )
 
-            if not property_id or price is None or not address or not property_url:
+            if not property_id or price is None or not property_url:
                 parse_loss = True
                 continue
+            if not address:
+                address = f"Rightmove property {property_id}"
 
             canonical = {
                 "id": property_id,
@@ -1419,31 +1713,26 @@ class RightmoveCog(commands.Cog):
         anchor: discord.TextChannel,
         cache: Dict[str, Dict[str, Any]],
     ) -> Tuple[int, List[str]]:
-        """Place active property channels directly below the anchor in price order.
+        """Move property channels out of legacy categories, then sort by price.
 
-        This deliberately uses one bulk channel-position update instead of chaining
-        ``channel.move(after=...)`` calls. Some Discord library versions resolve a
-        relative move against the channel's *current* category even when
-        ``category=None`` is supplied. That makes moving a categorised property
-        beneath an uncategorised anchor fail with "Could not resolve appropriate
-        move position". A single payload also avoids partial category migrations
-        and greatly reduces rate-limit exposure.
+        Discord permits only one ``parent_id`` change per bulk request. Therefore
+        category removal is deliberately performed one channel at a time. Once all
+        movable channels are top-level, one position-only bulk request establishes
+        the final order without touching any parent IDs.
         """
         active: List[Tuple[int, str, discord.TextChannel]] = []
-        seen_channel_ids: Set[int] = set()
+        seen_channel_ids: set[int] = set()
 
         for pid, raw in cache.items():
             state = self._normalise_cached_state(pid, raw)
             if not state.get("active"):
                 continue
-
             channel_id = _safe_int(state.get("channel_id"))
             channel = guild.get_channel(channel_id) if channel_id else None
             if not isinstance(channel, discord.TextChannel):
                 continue
             if channel.id == anchor.id or channel.id in seen_channel_ids:
                 continue
-
             seen_channel_ids.add(channel.id)
             price = _safe_int(state.get("current_price"))
             active.append((price if price is not None else 10**18, pid, channel))
@@ -1452,74 +1741,137 @@ class RightmoveCog(commands.Cog):
         if not active:
             return 0, []
 
-        property_channels = [item[2] for item in active]
+        errors: List[str] = []
+        changed_channel_ids: set[int] = set()
+        orderable: List[Tuple[int, str, discord.TextChannel]] = []
+
+        # Phase 1: detach from old categories individually. Discord rejects a
+        # bulk payload containing parent_id changes for multiple channels.
+        for price, pid, channel in active:
+            if channel.category_id is not None:
+                try:
+                    edited = await channel.edit(
+                        category=None,
+                        sync_permissions=False,
+                        reason="Remove legacy Rightmove category",
+                    )
+                    if isinstance(edited, discord.TextChannel):
+                        channel = edited
+                    else:
+                        refreshed = guild.get_channel(channel.id)
+                        if isinstance(refreshed, discord.TextChannel):
+                            channel = refreshed
+                    changed_channel_ids.add(channel.id)
+                    await asyncio.sleep(0.20)
+                except asyncio.CancelledError:
+                    raise
+                except (discord.Forbidden, discord.HTTPException, TypeError) as exc:
+                    errors.append(f"prop-{pid}: could not leave old category: {exc}")
+                    continue
+            orderable.append((price, pid, channel))
+
+        if not orderable:
+            return len(changed_channel_ids), errors
+
+        property_channels = [item[2] for item in orderable]
         property_ids = {channel.id for channel in property_channels}
+        anchor_bucket = anchor._sorting_bucket
+
+        current_top_level = sorted(
+            [
+                channel
+                for channel in guild.channels
+                if getattr(channel, "_sorting_bucket", None) == anchor_bucket
+                and getattr(channel, "category_id", None) is None
+            ],
+            key=lambda channel: (channel.position, channel.id),
+        )
 
         try:
-            anchor_bucket = anchor._sorting_bucket
-            siblings = sorted(
-                [
-                    channel
-                    for channel in guild.channels
-                    if getattr(channel, "_sorting_bucket", None) == anchor_bucket
-                    and getattr(channel, "category_id", None) is None
-                    and channel.id not in property_ids
-                ],
-                key=lambda channel: (channel.position, channel.id),
+            anchor_index = next(
+                index for index, channel in enumerate(current_top_level) if channel.id == anchor.id
+            )
+        except StopIteration:
+            errors.append("The anchor channel is not present in the uncategorised text-channel list.")
+            return len(changed_channel_ids), errors
+
+        desired_property_ids = [channel.id for channel in property_channels]
+        current_ids = [channel.id for channel in current_top_level]
+        current_after_anchor = current_ids[
+            anchor_index + 1 : anchor_index + 1 + len(desired_property_ids)
+        ]
+        already_contiguous = current_after_anchor == desired_property_ids
+
+        if not already_contiguous:
+            siblings_without_properties = [
+                channel for channel in current_top_level if channel.id not in property_ids
+            ]
+            try:
+                clean_anchor_index = next(
+                    index
+                    for index, channel in enumerate(siblings_without_properties)
+                    if channel.id == anchor.id
+                )
+            except StopIteration:
+                errors.append("The anchor channel disappeared while preparing the reorder.")
+                return len(changed_channel_ids), errors
+
+            desired = (
+                siblings_without_properties[: clean_anchor_index + 1]
+                + property_channels
+                + siblings_without_properties[clean_anchor_index + 1 :]
             )
 
-            try:
-                anchor_index = next(index for index, channel in enumerate(siblings) if channel.id == anchor.id)
-            except StopIteration:
-                return 0, ["The anchor channel is not present in the uncategorised channel list."]
-
-            desired = siblings[: anchor_index + 1] + property_channels + siblings[anchor_index + 1 :]
-            desired_property_order = [channel.id for channel in property_channels]
-            current_top_level_order = [
-                channel.id
-                for channel in sorted(
-                    [
-                        channel
-                        for channel in guild.channels
-                        if getattr(channel, "_sorting_bucket", None) == anchor_bucket
-                        and getattr(channel, "category_id", None) is None
-                    ],
-                    key=lambda channel: (channel.position, channel.id),
-                )
-                if channel.id in property_ids
+            # Position-only payload: no parent_id keys are included here.
+            payload = [
+                {"id": channel.id, "position": position}
+                for position, channel in enumerate(desired)
             ]
 
-            needs_reorder = (
-                current_top_level_order != desired_property_order
-                or any(channel.category_id is not None for channel in property_channels)
-            )
-            if not needs_reorder:
-                return 0, []
+            try:
+                await anchor._state.http.bulk_channel_update(
+                    guild.id,
+                    payload,
+                    reason="Sort Rightmove properties by price",
+                )
+                changed_channel_ids.update(property_ids)
+            except asyncio.CancelledError:
+                raise
+            except (discord.Forbidden, discord.HTTPException, TypeError) as exc:
+                # Conservative fallback. All participating channels are already
+                # uncategorised, so relative moves can now be resolved safely.
+                errors.append(f"Bulk position update failed; using sequential fallback: {exc}")
+                previous: discord.TextChannel = anchor
+                for _, pid, channel in orderable:
+                    try:
+                        latest_top_level = sorted(
+                            [
+                                item
+                                for item in guild.text_channels
+                                if item.category_id is None
+                            ],
+                            key=lambda item: (item.position, item.id),
+                        )
+                        correct = (
+                            previous in latest_top_level
+                            and channel in latest_top_level
+                            and latest_top_level.index(channel)
+                            == latest_top_level.index(previous) + 1
+                        )
+                        if not correct:
+                            await channel.move(
+                                after=previous,
+                                reason="Sort Rightmove properties by price",
+                            )
+                            changed_channel_ids.add(channel.id)
+                            await asyncio.sleep(0.20)
+                        previous = channel
+                    except asyncio.CancelledError:
+                        raise
+                    except (discord.Forbidden, discord.HTTPException, TypeError) as fallback_exc:
+                        errors.append(f"prop-{pid}: could not be positioned: {fallback_exc}")
 
-            payload: List[Dict[str, Any]] = []
-            for position, channel in enumerate(desired):
-                item: Dict[str, Any] = {"id": channel.id, "position": position}
-                if channel.id in property_ids:
-                    item.update(parent_id=None, lock_permissions=False)
-                payload.append(item)
-
-            await anchor._state.http.bulk_channel_update(
-                guild.id,
-                payload,
-                reason="Sort Rightmove properties by price",
-            )
-            return len(property_channels), []
-
-        except asyncio.CancelledError:
-            raise
-        except (discord.Forbidden, discord.HTTPException) as exc:
-            return 0, [f"Could not reorder property channels: {exc}"]
-        except Exception as exc:
-            # Reordering is presentation-only. Never discard a successful scrape,
-            # embed update, or cache reconciliation because Discord positioning
-            # failed or a library implementation differs.
-            log.exception("Rightmove channel reorder failed in guild %s", guild.id)
-            return 0, [f"Could not reorder property channels: {exc}"]
+        return len(changed_channel_ids), errors
 
     async def _run_scrape(
         self,

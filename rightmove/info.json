@@ -1,8 +1,8 @@
 {
   "name": "rightmove",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "short": "Reliable multi-server Rightmove property monitoring.",
-  "description": "Multi-server Rightmove monitor with drawn-area URLs, per-server filters, safe reconciliation, persistent scheduling, reliable embeds, and atomic price-ordering of property channels.",
+  "description": "Multi-server Rightmove monitor with drawn-area URLs, per-server filters, safe reconciliation, persistent scheduling, reliable embeds, JSON-model parsing, and two-phase price-ordering of property channels.",
   "author": [
     "Five"
   ],
