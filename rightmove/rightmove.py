@@ -1419,56 +1419,107 @@ class RightmoveCog(commands.Cog):
         anchor: discord.TextChannel,
         cache: Dict[str, Dict[str, Any]],
     ) -> Tuple[int, List[str]]:
+        """Place active property channels directly below the anchor in price order.
+
+        This deliberately uses one bulk channel-position update instead of chaining
+        ``channel.move(after=...)`` calls. Some Discord library versions resolve a
+        relative move against the channel's *current* category even when
+        ``category=None`` is supplied. That makes moving a categorised property
+        beneath an uncategorised anchor fail with "Could not resolve appropriate
+        move position". A single payload also avoids partial category migrations
+        and greatly reduces rate-limit exposure.
+        """
         active: List[Tuple[int, str, discord.TextChannel]] = []
+        seen_channel_ids: Set[int] = set()
+
         for pid, raw in cache.items():
             state = self._normalise_cached_state(pid, raw)
             if not state.get("active"):
                 continue
+
             channel_id = _safe_int(state.get("channel_id"))
             channel = guild.get_channel(channel_id) if channel_id else None
             if not isinstance(channel, discord.TextChannel):
                 continue
+            if channel.id == anchor.id or channel.id in seen_channel_ids:
+                continue
+
+            seen_channel_ids.add(channel.id)
             price = _safe_int(state.get("current_price"))
             active.append((price if price is not None else 10**18, pid, channel))
 
         active.sort(key=lambda item: (item[0], int(item[1]) if item[1].isdigit() else item[1]))
-        moved = 0
-        errors: List[str] = []
-        previous: discord.TextChannel = anchor
+        if not active:
+            return 0, []
 
-        for _, pid, channel in active:
+        property_channels = [item[2] for item in active]
+        property_ids = {channel.id for channel in property_channels}
+
+        try:
+            anchor_bucket = anchor._sorting_bucket
+            siblings = sorted(
+                [
+                    channel
+                    for channel in guild.channels
+                    if getattr(channel, "_sorting_bucket", None) == anchor_bucket
+                    and getattr(channel, "category_id", None) is None
+                    and channel.id not in property_ids
+                ],
+                key=lambda channel: (channel.position, channel.id),
+            )
+
             try:
-                top_level = sorted(
-                    [item for item in guild.text_channels if item.category is None],
-                    key=lambda item: (item.position, item.id),
+                anchor_index = next(index for index, channel in enumerate(siblings) if channel.id == anchor.id)
+            except StopIteration:
+                return 0, ["The anchor channel is not present in the uncategorised channel list."]
+
+            desired = siblings[: anchor_index + 1] + property_channels + siblings[anchor_index + 1 :]
+            desired_property_order = [channel.id for channel in property_channels]
+            current_top_level_order = [
+                channel.id
+                for channel in sorted(
+                    [
+                        channel
+                        for channel in guild.channels
+                        if getattr(channel, "_sorting_bucket", None) == anchor_bucket
+                        and getattr(channel, "category_id", None) is None
+                    ],
+                    key=lambda channel: (channel.position, channel.id),
                 )
-                correct = False
-                if previous in top_level and channel in top_level:
-                    correct = top_level.index(channel) == top_level.index(previous) + 1
+                if channel.id in property_ids
+            ]
 
-                if not correct:
-                    await channel.move(
-                        after=previous,
-                        category=None,
-                        sync_permissions=False,
-                        reason="Sort Rightmove properties by price",
-                    )
-                    moved += 1
-                    await asyncio.sleep(0.15)
-                previous = channel
-            except (discord.Forbidden, discord.HTTPException, TypeError) as exc:
-                # Some older discord.py builds are fussy about move(category=None).
-                try:
-                    if channel.category is not None:
-                        await channel.edit(category=None, sync_permissions=False, reason="Remove old Rightmove category")
-                    await channel.move(after=previous, reason="Sort Rightmove properties by price")
-                    moved += 1
-                    previous = channel
-                    await asyncio.sleep(0.15)
-                except (discord.Forbidden, discord.HTTPException, TypeError) as fallback_exc:
-                    errors.append(f"prop-{pid}: {fallback_exc or exc}")
+            needs_reorder = (
+                current_top_level_order != desired_property_order
+                or any(channel.category_id is not None for channel in property_channels)
+            )
+            if not needs_reorder:
+                return 0, []
 
-        return moved, errors
+            payload: List[Dict[str, Any]] = []
+            for position, channel in enumerate(desired):
+                item: Dict[str, Any] = {"id": channel.id, "position": position}
+                if channel.id in property_ids:
+                    item.update(parent_id=None, lock_permissions=False)
+                payload.append(item)
+
+            await anchor._state.http.bulk_channel_update(
+                guild.id,
+                payload,
+                reason="Sort Rightmove properties by price",
+            )
+            return len(property_channels), []
+
+        except asyncio.CancelledError:
+            raise
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            return 0, [f"Could not reorder property channels: {exc}"]
+        except Exception as exc:
+            # Reordering is presentation-only. Never discard a successful scrape,
+            # embed update, or cache reconciliation because Discord positioning
+            # failed or a library implementation differs.
+            log.exception("Rightmove channel reorder failed in guild %s", guild.id)
+            return 0, [f"Could not reorder property channels: {exc}"]
 
     async def _run_scrape(
         self,
