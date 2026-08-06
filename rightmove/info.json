@@ -1,8 +1,8 @@
 {
   "name": "rightmove",
-  "version": "2.1.5",
+  "version": "2.1.6",
   "short": "Reliable multi-server Rightmove property monitoring.",
-  "description": "Multi-server Rightmove monitor with per-server drawn-area searches, filters, safe reconciliation, persistent scheduling, reliable embeds and Next.js thumbnail recovery from Rightmove search-result JSON, price ordering, strict highlighting for permanently discounted outright-ownership homes including LCHO/RSL, cancellable live scrapes, and safe per-server price-limit purging.",
+  "description": "Multi-server Rightmove monitor with per-server drawn-area searches, filters, safe reconciliation, persistent scheduling, reliable embeds with large property images and Next.js image recovery from Rightmove search-result JSON, price ordering, strict highlighting for permanently discounted outright-ownership homes including LCHO/RSL, cancellable live scrapes, and safe per-server price-limit purging.",
   "author": [
     "Five"
   ],
@@ -18,6 +18,6 @@
   ],
   "hidden": false,
   "disabled": false,
-  "install_msg": "After loading, use `[p]rm setup #anchor <full Rightmove search URL>`. For a profile that should include permanent-discount LCHO/RSL homes hidden by Rightmove’s broad shared-ownership bucket, run `[p]rm affordable on`; genuine shared ownership, shared equity, rent-on-remainder and leasehold listings remain blocked by the cog. Use `[p]rm highlight reset` to mark permanent-discount ownership homes with a star. Use `[p]rm run refresh` to repopulate and rewrite existing embed thumbnails from the current Next.js search payload.",
+  "install_msg": "After loading, use `[p]rm setup #anchor <full Rightmove search URL>`. For a profile that should include permanent-discount LCHO/RSL homes hidden by Rightmove\u2019s broad shared-ownership bucket, run `[p]rm affordable on`; genuine shared ownership, shared equity, rent-on-remainder and leasehold listings remain blocked by the cog. Use `[p]rm highlight reset` to mark permanent-discount ownership homes with a star. Use `[p]rm run refresh` to repopulate and rewrite existing large embed images from the current Next.js search payload.",
   "end_user_data_statement": "This cog stores per-server configuration, Rightmove property metadata, Discord channel/message IDs, and scrape state. It does not store end-user personal data."
 }

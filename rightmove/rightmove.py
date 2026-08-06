@@ -2060,7 +2060,7 @@ class RightmoveCog(commands.Cog):
             embed.url = state["url"]
 
         if state.get("image_url"):
-            embed.set_thumbnail(url=state["image_url"])
+            embed.set_image(url=state["image_url"])
 
         current_price = _safe_int(state.get("current_price"))
         original_price = _safe_int(state.get("original_price"))
