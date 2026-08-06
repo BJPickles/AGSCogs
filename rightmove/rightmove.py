@@ -855,13 +855,39 @@ class RightmoveClient:
 
     @staticmethod
     def _extract_json_model(tree: html.HtmlElement) -> Optional[Dict[str, Any]]:
-        """Extract Rightmove's embedded ``window.jsonModel`` payload when present.
+        """Extract Rightmove's embedded search-result JSON.
 
-        The JSON payload is substantially more stable than presentation CSS classes
-        and, importantly, includes promoted cards that can use different HTML markup.
+        Rightmove's current search pages use a Next.js JSON script containing
+        ``props.pageProps.searchResults``. Older pages used ``window.jsonModel``.
+        Supporting both matters because the visible HTML cards no longer reliably
+        contain their property-photo URLs, while the Next.js property objects still
+        expose ``propertyImages.images[*].srcUrl``.
         """
+        scripts = tree.xpath("//script/text()")
+
+        # Current Next.js payload. Keep this first: it contains the complete property
+        # objects, including image URLs, whereas the rendered card markup may contain
+        # only alt text/placeholders until JavaScript runs.
+        for script in scripts:
+            if not isinstance(script, str) or "searchResults" not in script:
+                continue
+            candidate = script.strip()
+            if not candidate:
+                continue
+            try:
+                model = json.loads(candidate)
+            except (json.JSONDecodeError, TypeError):
+                # Some responses HTML-escape characters inside the JSON script.
+                try:
+                    model = json.loads(html_unescape(candidate))
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            if isinstance(model, dict):
+                return model
+
+        # Legacy payload retained for older/A-B Rightmove responses.
         decoder = json.JSONDecoder()
-        for script in tree.xpath("//script/text()"):
+        for script in scripts:
             if not isinstance(script, str) or "window.jsonModel" not in script:
                 continue
             marker = "window.jsonModel"
