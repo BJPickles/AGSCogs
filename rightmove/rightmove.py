@@ -5,6 +5,7 @@ import copy
 import datetime as dt
 import hashlib
 import json
+from html import unescape as html_unescape
 import logging
 import math
 import re
@@ -78,8 +79,8 @@ DEFAULT_BANNED_TEXT = [
 ]
 
 # Scheme highlighting is intentionally narrow. It marks only homes sold with a
-# legally retained percentage discount to market value: First Homes, Discount
-# Market Sale and equivalent Section 106 discounted-sale products. It does NOT
+# legally retained percentage discount to market value: First Homes, LCHO/RSL,
+# Discount Market Sale and equivalent Section 106 discounted-sale products. It does NOT
 # mark shared ownership, shared equity, equity loans, Rent to Buy, ordinary
 # first-time-buyer marketing or temporary builder incentives.
 PERMANENT_DISCOUNT_RULES: Sequence[Tuple[str, re.Pattern[str]]] = (
@@ -94,6 +95,13 @@ PERMANENT_DISCOUNT_RULES: Sequence[Tuple[str, re.Pattern[str]]] = (
             r"discount\s+open\s+market\s+value|"
             r"discounted\s+sale\s+(?:home|housing|property|scheme)|"
             r"domv)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "Low-cost ownership (LCHO)",
+        re.compile(
+            r"\b(?:lcho|low[\s-]+cost(?:\s+affordable)?\s+(?:home|housing|home\s+ownership|ownership))\b",
             re.IGNORECASE,
         ),
     ),
@@ -169,6 +177,11 @@ DEFAULT_GUILD = {
         "exclude_locations": [],
         "banned_property_types": DEFAULT_BANNED_PROPERTY_TYPES,
         "banned_text": DEFAULT_BANNED_TEXT,
+        # Rightmove sometimes groups permanent-discount LCHO/RSL homes under
+        # its broad shared-ownership search flag. When enabled, the cog removes
+        # that search-level flag but still rejects actual shared ownership from
+        # each listing's own text and tenure details.
+        "include_discounted_ownership_search": False,
         "scheme_highlight_enabled": False,
         "scheme_highlight_emoji": "⭐",
         "scheme_highlight_terms": [],
@@ -341,15 +354,44 @@ def _channel_property_id(channel: discord.TextChannel) -> Optional[str]:
     return name_match.group(1) if name_match else None
 
 
-def _canonical_url(url: str, *, index: Optional[int] = None) -> str:
+def _canonical_url(
+    url: str,
+    *,
+    index: Optional[int] = None,
+    include_discounted_ownership: bool = False,
+) -> str:
     parts = urlsplit(url.strip())
     # Preserve duplicate query keys used by some Rightmove filters. Only the
-    # pagination index is replaced.
-    query = [
-        (key, value)
-        for key, value in parse_qsl(parts.query, keep_blank_values=True)
-        if key.casefold() != "index"
-    ]
+    # pagination index is replaced. Rightmove's broad shared-ownership flags
+    # can also hide legitimate permanent-discount LCHO/RSL freehold homes, so
+    # an opted-in profile removes those flags at request time and relies on the
+    # cog's stricter listing-level filters to reject genuine part ownership.
+    query: List[Tuple[str, str]] = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        key_folded = key.casefold()
+        if key_folded == "index":
+            continue
+
+        if include_discounted_ownership and key_folded == "dontshow":
+            tokens = [token.strip() for token in value.split(",") if token.strip()]
+            kept = [
+                token
+                for token in tokens
+                if re.sub(r"[\s_-]+", "", token).casefold() != "sharedownership"
+            ]
+            if kept:
+                query.append((key, ",".join(kept)))
+            continue
+
+        if include_discounted_ownership and key_folded == "partbuypartrent":
+            # ``false`` is Rightmove's legacy "exclude part-buy/part-rent"
+            # search flag. It is intentionally removed here because some LCHO
+            # listings are misclassified into the same broad bucket.
+            if value.strip().casefold() in {"", "0", "false", "no", "off"}:
+                continue
+
+        query.append((key, value))
+
     if index is not None:
         query.append(("index", str(index)))
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
@@ -540,6 +582,160 @@ class RightmoveClient:
             return int(match.group(1).replace(",", ""))
         except ValueError:
             return None
+
+    @staticmethod
+    def _normalise_image_url(value: Any, base: str = "https://www.rightmove.co.uk") -> Optional[str]:
+        text = _normalise_space(value)
+        if not text:
+            return None
+        text = html_unescape(text).replace("\\u002F", "/").replace("\\/", "/")
+        if text.startswith("data:"):
+            return None
+        if text.startswith("//"):
+            text = "https:" + text
+        candidate = urljoin(base, text)
+        try:
+            parts = urlsplit(candidate)
+        except ValueError:
+            return None
+        host = (parts.hostname or "").casefold()
+        path = parts.path.casefold()
+        if parts.scheme not in {"http", "https"}:
+            return None
+        if "media.rightmove.co.uk" not in host and not re.search(
+            r"\.(?:jpe?g|png|webp)(?:$|\?)", candidate, re.IGNORECASE
+        ):
+            return None
+        if any(marker in path for marker in ("property-location-marker", "/map/", "estate-agent-logo")):
+            return None
+        return candidate
+
+    @classmethod
+    def _image_from_srcset(
+        cls,
+        value: Any,
+        base: str = "https://www.rightmove.co.uk",
+    ) -> Optional[str]:
+        text = _normalise_space(value)
+        if not text:
+            return None
+        candidates = [piece.strip().split()[0] for piece in text.split(",") if piece.strip()]
+        for candidate in reversed(candidates):
+            image_url = cls._normalise_image_url(candidate, base)
+            if image_url:
+                return image_url
+        return None
+
+    @classmethod
+    def _image_from_value(
+        cls,
+        value: Any,
+        base: str = "https://www.rightmove.co.uk",
+        depth: int = 0,
+    ) -> Optional[str]:
+        if depth > 7:
+            return None
+        if isinstance(value, str):
+            if "," in value and (" 1x" in value or " 2x" in value or "w," in value):
+                srcset_image = cls._image_from_srcset(value, base)
+                if srcset_image:
+                    return srcset_image
+            return cls._normalise_image_url(value, base)
+        if isinstance(value, list):
+            for nested in value:
+                image_url = cls._image_from_value(nested, base, depth + 1)
+                if image_url:
+                    return image_url
+            return None
+        if not isinstance(value, dict):
+            return None
+
+        preferred_keys = (
+            "mainImageSrc",
+            "mainImageUrl",
+            "mainImage",
+            "primaryImage",
+            "displayImage",
+            "propertyImage",
+            "imageUrl",
+            "srcUrl",
+            "src",
+            "url",
+        )
+        for key in preferred_keys:
+            if key in value:
+                image_url = cls._image_from_value(value.get(key), base, depth + 1)
+                if image_url:
+                    return image_url
+        for key, nested in value.items():
+            key_folded = str(key).casefold()
+            if any(word in key_folded for word in ("image", "photo", "picture", "media")):
+                image_url = cls._image_from_value(nested, base, depth + 1)
+                if image_url:
+                    return image_url
+        return None
+
+    @classmethod
+    def _image_from_card_html(
+        cls,
+        card: html.HtmlElement,
+        base: str = "https://www.rightmove.co.uk",
+    ) -> Optional[str]:
+        srcset_values = card.xpath(
+            ".//picture//source/@srcset | .//picture//source/@data-srcset | "
+            ".//img/@srcset | .//img/@data-srcset"
+        )
+        for value in srcset_values:
+            image_url = cls._image_from_srcset(value, base)
+            if image_url:
+                return image_url
+
+        source_values = card.xpath(
+            ".//img/@src | .//img/@data-src | .//img/@data-original | "
+            ".//source/@src | .//source/@data-src"
+        )
+        for value in source_values:
+            image_url = cls._normalise_image_url(value, base)
+            if image_url:
+                return image_url
+        return None
+
+    @classmethod
+    def _image_from_detail_page(
+        cls,
+        tree: html.HtmlElement,
+        content: bytes,
+        base: str = "https://www.rightmove.co.uk",
+    ) -> Optional[str]:
+        meta_candidates = tree.xpath(
+            "//meta[@property='og:image' or @property='og:image:url' or "
+            "@name='twitter:image' or @name='twitter:image:src']/@content"
+        )
+        for value in meta_candidates:
+            image_url = cls._normalise_image_url(value, base)
+            if image_url:
+                return image_url
+
+        for script_text in tree.xpath("//script[@type='application/ld+json']/text()"):
+            try:
+                payload = json.loads(script_text)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            image_url = cls._image_from_value(payload, base)
+            if image_url:
+                return image_url
+
+        decoded = content.decode("utf-8", errors="ignore")
+        decoded = html_unescape(decoded).replace("\\u002F", "/").replace("\\/", "/")
+        for match in re.findall(
+            r"https?://media\.rightmove\.co\.uk[^\"'<>\s]+",
+            decoded,
+            flags=re.IGNORECASE,
+        ):
+            image_url = cls._normalise_image_url(match.rstrip("),]"), base)
+            if image_url:
+                return image_url
+        return None
 
     @staticmethod
     def _parse_marketed_text(text: Optional[str]) -> Tuple[Optional[str], Optional[int]]:
@@ -752,25 +948,24 @@ class RightmoveClient:
                 for phrase in ("sold stc", "sstc", "subject to contract", "under offer")
             )
 
-            images = item.get("propertyImages")
             image_url: Optional[str] = None
-            if isinstance(images, dict):
-                image_url = (
-                    images.get("mainImageSrc")
-                    or images.get("mainImage")
-                    or images.get("mainImageUrl")
-                )
-                image_list = images.get("images")
-                if not image_url and isinstance(image_list, list) and image_list:
-                    first_image = image_list[0]
-                    if isinstance(first_image, dict):
-                        image_url = (
-                            first_image.get("srcUrl")
-                            or first_image.get("url")
-                            or first_image.get("src")
-                        )
-            if image_url:
-                image_url = urljoin(base, str(image_url))
+            for image_key in (
+                "propertyImages",
+                "mainImage",
+                "mainImageUrl",
+                "mainImageSrc",
+                "primaryImage",
+                "displayImage",
+                "propertyImage",
+                "images",
+                "photos",
+                "media",
+            ):
+                if image_key not in item:
+                    continue
+                image_url = cls._image_from_value(item.get(image_key), base)
+                if image_url:
+                    break
 
             customer = item.get("customer") if isinstance(item.get("customer"), dict) else {}
             agent = _normalise_space(
@@ -950,21 +1145,7 @@ class RightmoveClient:
                 id_match = re.search(r"/properties/(\d+)", property_url)
                 property_id = id_match.group(1) if id_match else None
 
-            image_url: Optional[str] = None
-            images = card.xpath(".//img")
-            for image in images:
-                srcset = image.get("srcset") or ""
-                src = image.get("src") or image.get("data-src")
-                if srcset:
-                    candidates = [piece.strip().split(" ")[0] for piece in srcset.split(",") if piece.strip()]
-                    if candidates:
-                        image_url = candidates[-1]
-                        break
-                if src and ("media.rightmove" in src or "property" in (image.get("alt") or "").casefold()):
-                    image_url = src
-                    break
-            if image_url:
-                image_url = urljoin(base, image_url)
+            image_url = cls._image_from_card_html(card, base)
 
             agent = cls._first_text(
                 card,
@@ -1043,16 +1224,25 @@ class RightmoveClient:
         return parsed, len(cards), parse_loss, expected, explicit_zero
 
     @classmethod
-    def scrape_search(cls, search_url: str) -> ScrapeResult:
+    def scrape_search(
+        cls,
+        search_url: str,
+        *,
+        include_discounted_ownership: bool = False,
+    ) -> ScrapeResult:
         result = ScrapeResult()
         session = cls._session()
+        effective_url = _canonical_url(
+            search_url,
+            include_discounted_ownership=include_discounted_ownership,
+        )
         seen_ids: set[str] = set()
         natural_end = False
         parse_loss_anywhere = False
 
         try:
             for page_number in range(MAX_SEARCH_PAGES):
-                page_url = _canonical_url(search_url, index=page_number * PAGE_SIZE)
+                page_url = _canonical_url(effective_url, index=page_number * PAGE_SIZE)
                 try:
                     status, content = cls._get(session, page_url)
                 except requests.RequestException as exc:
@@ -1140,7 +1330,7 @@ class RightmoveClient:
         try:
             status, content = cls._get(session, property_url)
             if status != 200 or not content:
-                return {"description": "", "filter_text": ""}
+                return {"description": "", "filter_text": "", "image_url": ""}
             tree = html.fromstring(content)
 
             description_parts = tree.xpath("//*[@data-testid='property-description']//text()")
@@ -1162,10 +1352,17 @@ class RightmoveClient:
             if not description:
                 metadata = tree.xpath("//meta[@name='description']/@content")
                 description = _normalise_space(metadata[0]) if metadata else ""
+                if description and not filter_text:
+                    filter_text = description
 
-            return {"description": description, "filter_text": filter_text}
+            image_url = cls._image_from_detail_page(tree, content, property_url) or ""
+            return {
+                "description": description,
+                "filter_text": filter_text,
+                "image_url": image_url,
+            }
         except (requests.RequestException, ValueError, TypeError):
-            return {"description": "", "filter_text": ""}
+            return {"description": "", "filter_text": "", "image_url": ""}
         finally:
             session.close()
 
@@ -1581,20 +1778,22 @@ class RightmoveCog(commands.Cog):
         ignored_state: Optional[Dict[str, Any]],
         *,
         force_refresh: bool,
-    ) -> Dict[str, str]:
+    ) -> Dict[str, Any]:
         fingerprint = row.get("fingerprint")
         if not force_refresh:
             if old_state and old_state.get("fingerprint") == fingerprint and (
                 old_state.get("description") or old_state.get("filter_text")
-            ):
+            ) and (row.get("image_url") or old_state.get("image_url")):
                 return {
                     "description": old_state.get("description", ""),
                     "filter_text": old_state.get("filter_text") or old_state.get("description", ""),
+                    "image_url": row.get("image_url") or old_state.get("image_url") or "",
                 }
             if ignored_state and ignored_state.get("fingerprint") == fingerprint:
                 return {
                     "description": ignored_state.get("description", ""),
                     "filter_text": ignored_state.get("filter_text", ""),
+                    "image_url": row.get("image_url") or "",
                 }
 
         return await asyncio.to_thread(RightmoveClient.fetch_details, row["url"])
@@ -1604,7 +1803,7 @@ class RightmoveCog(commands.Cog):
         pid: str,
         row: Dict[str, Any],
         old_raw: Optional[Dict[str, Any]],
-        details: Dict[str, str],
+        details: Dict[str, Any],
     ) -> Tuple[Dict[str, Any], str, bool]:
         now = _utc_ts()
         old = self._normalise_cached_state(pid, old_raw or {})
@@ -1646,6 +1845,12 @@ class RightmoveCog(commands.Cog):
             old_raw is not None
             and (not old.get("fingerprint") or old.get("fingerprint") != row.get("fingerprint"))
         )
+        new_image_url = (
+            RightmoveClient._normalise_image_url(row.get("image_url"), row.get("url") or "https://www.rightmove.co.uk")
+            or RightmoveClient._normalise_image_url(details.get("image_url"), row.get("url") or "https://www.rightmove.co.uk")
+            or old.get("image_url")
+        )
+        image_changed = bool(old_raw is not None and new_image_url != old.get("image_url"))
         price_changed = old_price is not None and new_price is not None and old_price != new_price
         status_changed = old_stc != new_stc
         old_scheme_matches = [
@@ -1672,7 +1877,7 @@ class RightmoveCog(commands.Cog):
             event = "price_increased"
         elif scheme_changed:
             event = "highlight_updated"
-        elif fingerprint_changed:
+        elif fingerprint_changed or image_changed:
             event = "details_updated"
         else:
             event = "unchanged"
@@ -1689,7 +1894,7 @@ class RightmoveCog(commands.Cog):
             "type": _normalise_space(row.get("type")) or None,
             "number_bedrooms": _safe_float(row.get("number_bedrooms")),
             "url": row.get("url"),
-            "image_url": row.get("image_url"),
+            "image_url": new_image_url,
             "agent": _normalise_space(row.get("agent")) or None,
             "agent_url": row.get("agent_url"),
             "description": description,
@@ -2112,7 +2317,13 @@ class RightmoveCog(commands.Cog):
                     if anchor.category is not None:
                         raise RuntimeError("The anchor channel must be uncategorised so property channels can sit below it.")
 
-                    scrape = await asyncio.to_thread(RightmoveClient.scrape_search, search_url)
+                    scrape = await asyncio.to_thread(
+                        RightmoveClient.scrape_search,
+                        search_url,
+                        include_discounted_ownership=bool(
+                            settings.get("include_discounted_ownership_search", False)
+                        ),
+                    )
                     if scrape.pages_fetched == 0:
                         raise RuntimeError("The Rightmove search could not be fetched: " + "; ".join(scrape.errors))
 
@@ -2364,6 +2575,40 @@ class RightmoveCog(commands.Cog):
         )
         await ctx.send("✅ This server's Rightmove search URL has been saved.")
 
+    @rm.command(name="affordable", aliases=["discountedsearch"])
+    async def rm_affordable(self, ctx: commands.Context, mode: str = "status") -> None:
+        """Include permanent-discount LCHO/RSL homes hidden by broad Rightmove flags."""
+        mode = (mode or "status").strip().casefold()
+        settings = await self.config.guild(ctx.guild).settings()
+        if mode in {"on", "enable", "enabled", "yes", "true"}:
+            settings["include_discounted_ownership_search"] = True
+            await self.config.guild(ctx.guild).settings.set(settings)
+            return await ctx.send(
+                "✅ Discounted-ownership search enabled for this server. Rightmove's broad "
+                "shared-ownership/part-buy search flags will be ignored so LCHO/RSL permanent-"
+                "discount homes can appear. Actual shared ownership, shared equity, rent-on-"
+                "remainder and leasehold listings are still rejected from their own details."
+            )
+        if mode in {"off", "disable", "disabled", "no", "false"}:
+            settings["include_discounted_ownership_search"] = False
+            await self.config.guild(ctx.guild).settings.set(settings)
+            return await ctx.send(
+                "✅ Discounted-ownership search disabled for this server. The saved Rightmove "
+                "search flags will be used exactly as supplied."
+            )
+        if mode not in {"status", "show", "list"}:
+            return await ctx.send("❌ Use `.rm affordable on`, `.rm affordable off`, or `.rm affordable status`.")
+        enabled = bool(settings.get("include_discounted_ownership_search", False))
+        await ctx.send(
+            "**Discounted-ownership search:** " + ("Enabled" if enabled else "Disabled") + "\n"
+            + (
+                "LCHO/RSL and other permanent-discount homes can pass Rightmove's broad search bucket; "
+                "genuine shared ownership remains blocked by the cog."
+                if enabled
+                else "Rightmove's own shared-ownership/part-buy exclusions remain in force."
+            )
+        )
+
     @rm.command(name="setanchor")
     async def rm_setanchor(
         self,
@@ -2545,6 +2790,15 @@ class RightmoveCog(commands.Cog):
             ),
             inline=True,
         )
+        embed.add_field(
+            name="Discounted ownership search",
+            value=(
+                "Enabled • broad Rightmove ownership flags bypassed"
+                if settings.get("include_discounted_ownership_search")
+                else "Disabled"
+            ),
+            inline=True,
+        )
         include = settings.get("include_locations", [])
         exclude = settings.get("exclude_locations", [])
         embed.add_field(
@@ -2658,7 +2912,7 @@ class RightmoveCog(commands.Cog):
         lines = [
             f"**Scheme highlighting:** {'Enabled' if enabled else 'Disabled'}",
             f"**Channel marker:** {emoji}",
-            "**Built-in detection:** First Homes; Discount/Discounted Market Sale; DOMV; Section 106 discounted sale; homes sold at a stated percentage of market value; and wording that legally retains the discount on every resale.",
+            "**Built-in detection:** First Homes; Low-Cost Home Ownership (LCHO/RSL); Discount/Discounted Market Sale; DOMV; Section 106 discounted sale; homes sold at a stated percentage of market value; and wording that legally retains the discount on every resale.",
             "**Never highlighted:** shared ownership, part-buy/part-rent, shared equity, equity loans, Rent to Buy, leasehold, generic first-time-buyer wording, or temporary builder incentives.",
             "**Custom phrases:**",
             *(f"• {item}" for item in custom),
