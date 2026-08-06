@@ -96,7 +96,10 @@ DEFAULT_GUILD = {
         "banned_text": DEFAULT_BANNED_TEXT,
         "last_attempt_ts": None,
         "last_success_ts": None,
-        "last_summary": {},
+        # Keep this a scalar Config Value. Earlier versions registered this
+        # path as None; changing it to a dict would make it a Config Group and
+        # Red refuses to register a Group and Value under the same name.
+        "last_summary": "",
         "consecutive_failures": 0,
         "legacy_migrated": False,
     },
@@ -140,6 +143,27 @@ def _normalise_match_text(value: Any) -> str:
 
 def _compact_match_text(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", _normalise_space(value).casefold())
+
+
+def _encode_summary(value: Dict[str, Any]) -> str:
+    """Store scrape summaries as a scalar JSON value for Config compatibility."""
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return json.dumps({"error": "Summary could not be serialised."})
+
+
+def _decode_summary(value: Any) -> Dict[str, Any]:
+    """Read current JSON summaries and repair dictionaries from v1.1.1."""
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def _matches_phrase(haystack: str, phrase: str) -> bool:
@@ -815,10 +839,14 @@ class RightmoveCog(commands.Cog):
             if key in settings:
                 settings[key] = value
 
-        # Keep the type aligned with the registered default so Red's nested
-        # config merger remains valid after both successful and failed runs.
-        if not isinstance(settings.get("last_summary"), dict):
-            settings["last_summary"] = {}
+        # v1.1.1 briefly stored this as a mapping even though older versions
+        # registered the same path as a scalar. Convert any such value to JSON
+        # before normal Config reads attempt to merge registered defaults.
+        summary = settings.get("last_summary")
+        if isinstance(summary, dict):
+            settings["last_summary"] = _encode_summary(summary)
+        elif not isinstance(summary, str):
+            settings["last_summary"] = ""
 
         await guild_config.set_raw("settings", value=settings)
         return settings
@@ -1615,7 +1643,7 @@ class RightmoveCog(commands.Cog):
                     # Keep last_success_ts unchanged so the scheduler retries later
                     # instead of treating a partial scrape as the day's success.
                     settings["consecutive_failures"] = int(settings.get("consecutive_failures", 0)) + 1
-                settings["last_summary"] = {
+                settings["last_summary"] = _encode_summary({
                     "timestamp": now,
                     "source": source,
                     "complete": scrape.complete,
@@ -1629,7 +1657,7 @@ class RightmoveCog(commands.Cog):
                     "moved": moved,
                     "ignored": newly_ignored,
                     "errors": errors[-10:],
-                }
+                })
                 await guild_config.settings.set(settings)
 
                 summary = (
@@ -1650,12 +1678,12 @@ class RightmoveCog(commands.Cog):
             except Exception as exc:
                 settings = await guild_config.settings()
                 settings["consecutive_failures"] = int(settings.get("consecutive_failures", 0)) + 1
-                settings["last_summary"] = {
+                settings["last_summary"] = _encode_summary({
                     "timestamp": _utc_ts(),
                     "source": source,
                     "complete": False,
                     "error": repr(exc),
-                }
+                })
                 await guild_config.settings.set(settings)
                 await self._log(guild, f"Scrape failed: {exc!r}")
                 log.exception("Rightmove scrape failed in guild %s", guild.id)
@@ -1889,8 +1917,8 @@ class RightmoveCog(commands.Cog):
         url = settings.get("search_url")
         embed.add_field(name="Search URL", value=_truncate(url or "Not set", 1024), inline=False)
 
-        last_summary = settings.get("last_summary")
-        if isinstance(last_summary, dict):
+        last_summary = _decode_summary(settings.get("last_summary"))
+        if last_summary:
             embed.add_field(
                 name="Last result",
                 value=_truncate(f"```json\n{json.dumps(last_summary, indent=2)}\n```", 1024),
