@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -95,7 +96,7 @@ DEFAULT_GUILD = {
         "banned_text": DEFAULT_BANNED_TEXT,
         "last_attempt_ts": None,
         "last_success_ts": None,
-        "last_summary": None,
+        "last_summary": {},
         "consecutive_failures": 0,
         "legacy_migrated": False,
     },
@@ -152,10 +153,38 @@ def _matches_phrase(haystack: str, phrase: str) -> bool:
 
 
 def _safe_int(value: Any) -> Optional[int]:
-    try:
-        if value is None or isinstance(value, bool):
+    """Convert integer-like values without corrupting Discord snowflake IDs.
+
+    Discord channel/message IDs are commonly 18-19 digits. Passing them through
+    ``float`` loses precision, so exact integers and digit strings must be handled
+    before any floating-point fallback used for values such as ``"220000.0"``.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+
+    if isinstance(value, int):
+        return value
+
+    if isinstance(value, str):
+        cleaned = value.strip().replace(",", "")
+        if not cleaned:
             return None
-        return int(float(value))
+        if re.fullmatch(r"[+-]?\d+", cleaned):
+            try:
+                return int(cleaned)
+            except (ValueError, OverflowError):
+                return None
+        try:
+            number = float(cleaned)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return int(number) if math.isfinite(number) else None
+
+    if isinstance(value, float):
+        return int(value) if math.isfinite(value) else None
+
+    try:
+        return int(value)
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -758,11 +787,41 @@ class RightmoveCog(commands.Cog):
         self._active_runs: Dict[int, asyncio.Task] = {}
 
     async def cog_load(self) -> None:
+        # Normalise data written by earlier versions before any command or the
+        # scheduler reads it. In particular, Red cannot merge a stored mapping
+        # into a registered default of ``None``.
+        for guild in list(self.bot.guilds):
+            await self._repair_guild_settings(guild)
+
         if self._scheduler_task is None or self._scheduler_task.done():
             self._scheduler_task = asyncio.create_task(
                 self._scheduler_loop(),
                 name="rightmove-scheduler",
             )
+
+    async def _repair_guild_settings(self, guild: discord.Guild) -> Dict[str, Any]:
+        guild_config = self.config.guild(guild)
+        try:
+            raw = await guild_config.get_raw("settings", default={})
+        except Exception:
+            log.exception("Could not read raw Rightmove settings for guild %s; resetting settings only", guild.id)
+            raw = {}
+
+        if not isinstance(raw, dict):
+            raw = {}
+
+        settings = copy.deepcopy(DEFAULT_GUILD["settings"])
+        for key, value in raw.items():
+            if key in settings:
+                settings[key] = value
+
+        # Keep the type aligned with the registered default so Red's nested
+        # config merger remains valid after both successful and failed runs.
+        if not isinstance(settings.get("last_summary"), dict):
+            settings["last_summary"] = {}
+
+        await guild_config.set_raw("settings", value=settings)
+        return settings
 
     def cog_unload(self) -> None:
         if self._scheduler_task and not self._scheduler_task.done():
