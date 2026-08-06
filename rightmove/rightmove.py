@@ -77,10 +77,12 @@ DEFAULT_BANNED_TEXT = [
     "non standard",
 ]
 
-# Built-in detection is deliberately stricter than a simple keyword list.
-# "Ideal first home" appears on many ordinary resales, so generic first-buyer
-# wording is only highlighted when the same advert also looks like a new home.
-SCHEME_HIGHLIGHT_RULES: Sequence[Tuple[str, re.Pattern[str]]] = (
+# Scheme highlighting is intentionally narrow. It marks only homes sold with a
+# legally retained percentage discount to market value: First Homes, Discount
+# Market Sale and equivalent Section 106 discounted-sale products. It does NOT
+# mark shared ownership, shared equity, equity loans, Rent to Buy, ordinary
+# first-time-buyer marketing or temporary builder incentives.
+PERMANENT_DISCOUNT_RULES: Sequence[Tuple[str, re.Pattern[str]]] = (
     (
         "First Homes scheme",
         re.compile(r"\b(?:first\s+homes(?:\s+scheme)?|first\s+home\s+scheme)\b", re.IGNORECASE),
@@ -88,59 +90,65 @@ SCHEME_HIGHLIGHT_RULES: Sequence[Tuple[str, re.Pattern[str]]] = (
     (
         "Discount Market Sale",
         re.compile(
-            r"\b(?:discount(?:ed)?\s+market\s+(?:sale|value)|discounted\s+sale|"
-            r"discount\s+open\s+market\s+value|domv)\b",
+            r"\b(?:discount(?:ed)?\s+market\s+(?:sale|value)|"
+            r"discount\s+open\s+market\s+value|"
+            r"discounted\s+sale\s+(?:home|housing|property|scheme)|"
+            r"domv)\b",
             re.IGNORECASE,
         ),
     ),
     (
-        "Affordable home ownership",
+        "Section 106 discounted sale",
         re.compile(
-            r"\b(?:affordable\s+(?:housing(?:\s+(?:scheme|programme|program))?"
-            r"|homes?\s+(?:ownership|scheme|programme|program))"
-            r"|low[\s-]*cost\s+home\s+ownership)\b",
+            r"\b(?:section\s*106|s106)\b.{0,120}\b(?:discount(?:ed)?\s+(?:market\s+)?sale|"
+            r"discount(?:ed)?\s+(?:market\s+)?value|affordable\s+sale)\b|"
+            r"\b(?:discount(?:ed)?\s+(?:market\s+)?sale|discount(?:ed)?\s+(?:market\s+)?value|"
+            r"affordable\s+sale)\b.{0,120}\b(?:section\s*106|s106)\b",
             re.IGNORECASE,
         ),
     ),
-    ("Section 106 scheme", re.compile(r"\b(?:section\s*106|s106)\b", re.IGNORECASE)),
     (
-        "Local eligibility restriction",
+        "Permanent resale discount",
         re.compile(
-            r"\blocal\s+(?:connection|occupancy|needs?)"
-            r"(?:\s+(?:criteria|restriction|requirement|scheme|housing))?\b",
+            r"\b(?:discount\s+(?:is\s+)?(?:retained|secured|protected)\s+(?:in\s+)?perpetuity|"
+            r"discount\s+(?:will\s+be\s+|is\s+)?passed\s+on\s+to\s+(?:all\s+)?future\s+(?:buyers|purchasers)|"
+            r"same\s+percentage\s+discount\s+(?:on|at)\s+(?:each\s+)?(?:future\s+)?resale|"
+            r"resale\s+(?:price\s+)?(?:restriction|covenant)|"
+            r"legal\s+(?:agreement|restriction|covenant).{0,100}future\s+(?:sale|resale)|"
+            r"continue\s+to\s+be\s+sold\s+(?:at|for)\s+(?:the\s+same\s+)?(?:percentage\s+)?discount)\b",
             re.IGNORECASE,
         ),
     ),
     (
-        "Below-market purchase",
+        "Percentage of market value",
         re.compile(
-            r"\b(?:below\s+market\s+(?:value|price)|"
-            r"(?:5\d|6\d|7\d|8\d|90)\s*%\s+(?:of\s+)?(?:the\s+)?(?:open\s+)?market\s+value|"
-            r"(?:1\d|2\d|3\d|4\d|50)\s*%\s+(?:off|discount))\b",
+            r"\b(?:sold|available|purchase|purchased|buy|bought|priced)\s+(?:at|for)\s+"
+            r"(?:5\d|6\d|7\d|8\d|90)\s*%\s+of\s+(?:the\s+)?(?:full\s+|open\s+)?market\s+value\b|"
+            r"\b(?:5\d|6\d|7\d|8\d|90)\s*%\s+of\s+(?:the\s+)?(?:full\s+|open\s+)?market\s+value\b",
             re.IGNORECASE,
         ),
-    ),
-    ("Shared-equity assistance", re.compile(r"\b(?:shared\s+equity|equity\s+loan)\b", re.IGNORECASE)),
-    (
-        "Key-worker scheme",
-        re.compile(r"\bkey\s+worker(?:s)?\s+(?:scheme|discount|criteria)\b", re.IGNORECASE),
     ),
 )
 
-FIRST_BUYER_RE = re.compile(r"\bfirst[\s-]*time\s+buyer(?:s)?\b", re.IGNORECASE)
-NEW_HOME_SIGNAL_RE = re.compile(
-    r"\b(?:new[\s-]*(?:build|home|homes)|brand[\s-]*new|"
-    r"new\s+development|housebuilder|homebuilder|show\s+home|"
-    r"reserve\s+(?:this|your)|plot\s+\d+)\b",
+# These products are specifically outside the user's target: outright ownership
+# of the whole freehold at a discount that remains attached to the home.
+DISQUALIFYING_ASSISTANCE_RE = re.compile(
+    r"\b(?:shared\s+ownership|part\s*buy\s*[,/&-]?\s*part\s*rent|"
+    r"shared\s+equity|equity\s+loan|help\s+to\s+buy\s+equity|"
+    r"rent\s+to\s+buy|staircasing|buy(?:ing)?\s+(?:a|an|your)\s+share|"
+    r"rent\s+on\s+(?:the\s+)?(?:remaining|unsold)\s+(?:share|equity)|"
+    r"leasehold)\b",
     re.IGNORECASE,
 )
-EXPLICIT_FIRST_BUYER_INCENTIVE_RE = re.compile(
-    r"\bfirst[\s-]*time\s+buyer(?:s)?\s+(?:scheme|incentive|offer)\b",
-    re.IGNORECASE,
-)
-NEW_HOME_INCENTIVE_RE = re.compile(
+
+# These phrases are not disqualifiers by themselves, but they are also not
+# evidence of a permanent discount and therefore never create a star.
+TEMPORARY_INCENTIVE_RE = re.compile(
     r"\b(?:deposit\s+contribution|mortgage\s+contribution|"
-    r"stamp\s+duty\s+(?:paid|contribution)|\d+\s*%\s+deposit\s+paid)\b",
+    r"stamp\s+duty\s+(?:paid|contribution)|cashback|"
+    r"first[\s-]*time\s+buyer(?:s)?\s+(?:offer|incentive)|"
+    r"key\s+worker(?:s)?\s+(?:offer|incentive)|"
+    r"ideal\s+(?:first\s+home|for\s+first[\s-]*time\s+buyers?))\b",
     re.IGNORECASE,
 )
 
@@ -1518,13 +1526,11 @@ class RightmoveCog(commands.Cog):
         settings: Dict[str, Any],
         details_filter_text: str = "",
     ) -> List[str]:
-        """Return human-readable reasons for adding the scheme star.
+        """Return reasons for marking a permanently discounted ownership home.
 
-        Detection examines the search card and the full property page. Explicit
-        affordable-sale terminology is highlighted directly. Generic first-time
-        buyer wording only qualifies when the advert also contains a new-home
-        signal, avoiding ordinary resales described merely as an "ideal first
-        home".
+        A star means the whole home is being sold at a legally retained discount
+        to market value. Generic affordability language, new-build incentives,
+        first-time-buyer advertising and partial-equity products do not qualify.
         """
         if not bool(settings.get("scheme_highlight_enabled", False)):
             return []
@@ -1540,24 +1546,23 @@ class RightmoveCog(commands.Cog):
                 ]
             )
         )
-        matches: List[str] = []
 
-        for label, pattern in SCHEME_HIGHLIGHT_RULES:
+        # Never star products where the buyer owns only a share, pays rent on
+        # retained equity, uses an equity loan, or receives leasehold tenure.
+        if DISQUALIFYING_ASSISTANCE_RE.search(combined):
+            return []
+
+        matches: List[str] = []
+        for label, pattern in PERMANENT_DISCOUNT_RULES:
             if pattern.search(combined):
                 matches.append(label)
 
-        if EXPLICIT_FIRST_BUYER_INCENTIVE_RE.search(combined):
-            matches.append("First-time buyer incentive")
-        elif FIRST_BUYER_RE.search(combined) and NEW_HOME_SIGNAL_RE.search(combined):
-            matches.append("First-time buyer new home")
-
-        if NEW_HOME_SIGNAL_RE.search(combined) and NEW_HOME_INCENTIVE_RE.search(combined):
-            matches.append("New-home buyer incentive")
-
+        # Custom phrases can cover a council/developer's local terminology, but
+        # they remain subject to the disqualifying-assistance check above.
         for phrase in settings.get("scheme_highlight_terms", []):
             phrase = _normalise_space(phrase)
             if phrase and _matches_phrase(combined, phrase):
-                matches.append(f"Custom: {phrase}")
+                matches.append(f"Custom permanent-discount term: {phrase}")
 
         unique: List[str] = []
         seen: set[str] = set()
@@ -2618,7 +2623,7 @@ class RightmoveCog(commands.Cog):
 
     @rm.group(name="highlight", invoke_without_command=True)
     async def rm_highlight(self, ctx: commands.Context) -> None:
-        """Highlight First Homes, discounted-sale and first-buyer new homes."""
+        """Highlight permanent-discount outright-ownership homes."""
         await ctx.send_help(ctx.command)
 
     @rm_highlight.command(name="status", aliases=["list"])
@@ -2634,7 +2639,8 @@ class RightmoveCog(commands.Cog):
         lines = [
             f"**Scheme highlighting:** {'Enabled' if enabled else 'Disabled'}",
             f"**Channel marker:** {emoji}",
-            "**Built-in detection:** First Homes; Discount/Discounted Market Sale; DOMV; affordable or low-cost home ownership; Section 106/S106; local connection/occupancy/needs restrictions; below-market percentage sales; shared equity/equity loan; key-worker schemes; first-time-buyer new-home wording and buyer incentives.",
+            "**Built-in detection:** First Homes; Discount/Discounted Market Sale; DOMV; Section 106 discounted sale; homes sold at a stated percentage of market value; and wording that legally retains the discount on every resale.",
+            "**Never highlighted:** shared ownership, part-buy/part-rent, shared equity, equity loans, Rent to Buy, leasehold, generic first-time-buyer wording, or temporary builder incentives.",
             "**Custom phrases:**",
             *(f"• {item}" for item in custom),
         ]
@@ -2647,8 +2653,9 @@ class RightmoveCog(commands.Cog):
     async def rm_highlight_on(self, ctx: commands.Context) -> None:
         await self.config.guild(ctx.guild).settings.set_raw("scheme_highlight_enabled", value=True)
         await ctx.send(
-            "✅ Scheme highlighting enabled for this server. "
-            "Run `.rm run refresh` after setup to scan existing listings and add stars."
+            "✅ Permanent-discount highlighting enabled for this server. "
+            "Only outright-ownership homes with a retained market-value discount will receive stars. "
+            "Run `.rm run refresh` after setup to scan existing listings."
         )
 
     @rm_highlight.command(name="off", aliases=["disable"])
@@ -2720,7 +2727,7 @@ class RightmoveCog(commands.Cog):
         settings["scheme_highlight_terms"] = []
         await self.config.guild(ctx.guild).settings.set(settings)
         await ctx.send(
-            "✅ Scheme highlighting reset to the built-in rules with the ⭐ marker. "
+            "✅ Permanent-discount highlighting reset to the strict built-in rules with the ⭐ marker. "
             "Run `.rm run refresh` to update existing listings."
         )
 
