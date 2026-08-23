@@ -1,0 +1,16 @@
+{
+    "author": ["AEGIS Game Studios", "AGSCogs"],
+    "description": "Plays a configured guild Soundboard sound whenever Red joins or moves voice channels, temporarily self-undeafening when required and restoring the previous self-deaf state afterwards.",
+    "disabled": false,
+    "end_user_data_statement": "Stores only a per-guild configured Discord Soundboard sound ID. This cog stores no user data.",
+    "hidden": false,
+    "install_msg": "Thank you for installing AGSVoiceSoundboard. Use `[p]agsvoicesoundboard list` to view this server's Soundboard sounds, then `[p]agsvoicesoundboard set <sound ID>` to select one.",
+    "min_bot_version": "3.5.17",
+    "min_python_version": [3, 9, 1],
+    "permissions": ["view_channel", "send_messages", "embed_links", "connect", "speak", "use_soundboard"],
+    "required_cogs": {},
+    "requirements": [],
+    "short": "Play a native guild Soundboard sound whenever Red joins or moves voice channels.",
+    "tags": ["voice", "soundboard", "audio", "utility", "ags"],
+    "type": "COG"
+}
