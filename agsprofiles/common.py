@@ -1,6 +1,7 @@
 # common.py
 
 import asyncio
+import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -11,8 +12,9 @@ from PIL import Image
 from redbot.core import bank
 from redbot.core.bot import Red
 
-from levelup.common.formatter import get_user_position
 from .models import Stats
+
+log = logging.getLogger("red.agsprofiles.common")
 
 # =========================================================
 # SNAPSHOT HELPERS
@@ -99,6 +101,11 @@ async def collect_levelup_stats(
         adapter = LevelUpAdapter(bot)
     except RuntimeError:
         return {}
+    # This module must remain importable before LevelUp is installed, so
+    # importing its formatter is delayed until a LevelUp-backed operation.
+    # setup() verifies the formatter API when the cog is loaded.
+    from levelup.common.formatter import get_user_position
+
     conf = adapter.get_conf(guild)
     stats_map: Dict[int, Stats] = {}
     for user_id, profile in conf.users.items():
@@ -106,21 +113,22 @@ async def collect_levelup_stats(
         if not member or member.bot:
             continue
         try:
+            # Vertyco LevelUp's public formatter expects:
+            # (guild, conf, lbtype, target_user, key).
             pos = await asyncio.to_thread(
                 get_user_position,
-                bot=bot,
                 guild=guild,
-                db=bot.get_cog("LevelUp").db,
-                stat="xp",
+                conf=conf,
                 lbtype="lb",
-                is_global=False,
-                member=member,
-                use_displayname=False,
-                color=None,
-                # fallback minimal args
+                target_user=user_id,
+                key="xp",
             )
             rank = pos.get("position", 0)
-        except Exception:
+        except Exception as exc:
+            log.warning(
+                "Could not determine LevelUp rank for user %s in guild %s: %s",
+                user_id, guild.id, exc,
+            )
             rank = 0
         balance = await adapter.get_balance(member)
         voice_hours = round(profile.voice / 3600, 2)
