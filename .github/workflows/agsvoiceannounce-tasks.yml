@@ -1,0 +1,31 @@
+name: AGS Voice Announce pending task tests
+
+on:
+  pull_request:
+    paths:
+      - 'agsvoiceannounce/**'
+      - 'tests/test_agsvoiceannounce_tasks.py'
+      - '.github/workflows/agsvoiceannounce-tasks.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'agsvoiceannounce/**'
+      - 'tests/test_agsvoiceannounce_tasks.py'
+      - '.github/workflows/agsvoiceannounce-tasks.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  voice-task-ownership:
+    name: Voice announcement task regression
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile cog and test rapid voice task replacement / cancellation
+        run: |
+          python -m compileall -q agsvoiceannounce
+          python -m unittest discover -s tests -p 'test_agsvoiceannounce_tasks.py' -v
