@@ -1,0 +1,28 @@
+name: Server Status security tests
+
+on:
+  pull_request:
+    paths:
+      - 'agsserverstatus/**'
+      - 'tests/**'
+      - '.github/workflows/serverstatus-security-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'agsserverstatus/**'
+      - 'tests/**'
+      - '.github/workflows/serverstatus-security-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run Server Status security regression suite
+        run: python -m unittest discover -s tests -v

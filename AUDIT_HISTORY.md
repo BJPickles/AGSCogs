@@ -12,6 +12,17 @@
 - **Validation labels:** *Source-confirmed* means the relevant condition was verified in repository code; *needs runtime verification* means the failure/impact has not been reproduced against a running Red bot.
 - **PR entry format:** Date and PR link; scope; findings opened/changed/closed (or explicit no-change statement); security/data/compatibility impact; tests performed and tests omitted; outstanding follow-ups. For a fix, reference the original finding ID.
 
+## Current finding dispositions (updated as PRs land)
+
+The baseline observations below remain historically unchanged. This table records
+the **latest** state; historical `Status: Open` labels in the original entries
+describe the state at the time of the 2026-10-28 baseline review.
+
+| ID | Current state | Follow-up |
+| --- | --- | --- |
+| **AUD-001** | **Fixed in source in [PR #3](https://github.com/BJPickles/AGSCogs/pull/3); pending live Red/Discord verification** | Bot-owner-only commands, per-target private access opt-in, validated and pinned destinations, redirect suppression, and regression tests. See dated entry below. |
+| **AUD-002–AUD-017** | Open (unchanged) | Refer to the original findings and future dated updates. AUD-007 (global Server Status configuration) remains separately open. |
+
 ## 2026-10-28 — Baseline audit (all 11 cogs)
 
 **Baseline:** [main @ f2d04f12bc69](https://github.com/BJPickles/AGSCogs/commit/f2d04f12bc69ac1e7be781caa75978eba167f3a6). **Method:** manual static review of repository tree, cog entry points, metadata, source commands, scheduled tasks, HTTP/Discord I/O, persistence, and destructive operations. **Not performed:** installing Red, running Discord integrations, live service calls, dynamic security testing, automated test execution, or independent vulnerability exploitation. Findings below are not a claim that every runtime issue has been found.
@@ -88,5 +99,14 @@
 - **Risk impact:** No runtime cog code changed. Adds a repository policy, PR checklist, and workflow check requiring future updates to this historical log.
 - **Validation:** Static source inspection, metadata/tree review, and source-linked finding descriptions. No Red/Discord runtime or automated tests were executed.
 - **Outstanding:** Every finding remains open until independently tested and addressed in a follow-up PR. The rolling log must be updated again in that PR.
+
+### 2026-10-28 — [PR #3](https://github.com/BJPickles/AGSCogs/pull/3): AUD-001 Server Status security fix
+
+- **Scope:** `agsserverstatus/agsserverstatus.py`, new `agsserverstatus/target_security.py`, `agsserverstatus/README.md`, `tests/test_serverstatus_security.py`, and test workflow. Original audited source: [AUD-001](#high-priority-findings).
+- **Status:** AUD-001 fixed in source; await CI result and a real Red/Discord validation before claiming production verification. AUD-007 is **not** resolved: configuration remains global across guilds. Other findings are unchanged.
+- **Security changes:** Bot-owner checks on the parent command group and each mutating command; default-deny private/non-global resolved destinations, with an explicit per-server `allow_private=True` owner opt-in; validate stored as well as new hosts and ports; reject URL injection, redirects and mixed private/public DNS answers; connect to the vetted IP rather than re-resolving the hostname.
+- **Behaviour and migration:** Reading/listing monitoring settings is now also owner-only because targets may disclose infrastructure IPs. Existing stored public targets continue to work. Old private/LAN entries remain saved but cannot be polled until the bot owner re-adds each target with the final `True` argument. This opt-in is persisted per realm and visible in list/view. Re-add resets last-known status. Scheduled monitors are not automatically deleted or migrated.
+- **Validation:** Added stdlib-only unit tests for permission decorator coverage, host and port validation, mixed DNS rejection, IPv4/IPv6 URL construction, direct-IP pinning, blocked legacy private targets, and disabled redirect following. Added a GitHub Actions runner for those tests. No live service, Red/Discord load, or production migration test was executed as part of this review; run the suite and stage before deployment.
+- **Residual risks / next steps:** Bot owners can intentionally opt into private network probing; this power is explicitly trusted and should not be delegated. Consider isolating configuration by guild under AUD-007 and adding integration tests around loaded Red commands, DNS resolution and real Discord permissions. Review existing saved targets before re-enabling private ones.
 
 <!-- APPEND NEW DATED PR AUDIT ENTRIES BELOW; NEVER DELETE OR REPLACE THE INITIAL BASELINE. -->
