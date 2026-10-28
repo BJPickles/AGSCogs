@@ -102,16 +102,17 @@ class FakeDestination:
         self.calls = []
         self.error = error
 
-    async def send(self, **kwargs):
+    async def send(self, *args, **kwargs):
+        content = kwargs.get("content", args[0] if args else None)
         file = kwargs.get("file")
         if file:
             self.calls.append({
                 "file": file, "closed_while_sending": file.closed,
                 "payload": file.stream.read(), "embed": kwargs.get("embed"),
-                "content": kwargs.get("content"),
+                "content": content,
             })
         else:
-            self.calls.append({"file": None, "content": kwargs.get("content"),
+            self.calls.append({"file": None, "content": content,
                                "embed": kwargs.get("embed")})
         if self.error:
             raise self.error
@@ -246,12 +247,12 @@ class AttachmentsTests(unittest.IsolatedAsyncioTestCase):
     async def test_weekly_snapshot_cleans_up_when_channel_send_fails(self):
         path = new_screenshot()
         class FirstSendFails(FakeDestination):
-            async def send(self, **kwargs):
+            async def send(self, *args, **kwargs):
                 if kwargs.get("file"):
                     self.error = RuntimeError("weekly upload failed")
                 else:
                     self.error = None
-                return await super().send(**kwargs)
+                return await super().send(*args, **kwargs)
 
         channel = FirstSendFails()
         guild = SimpleNamespace(id=123, get_channel=lambda cid: channel)
