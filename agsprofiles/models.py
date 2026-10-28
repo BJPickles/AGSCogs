@@ -8,6 +8,9 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 class SnapshotType(str, Enum):
+    # Match StrEnum's string representation on Python 3.9 and newer.
+    __str__ = str.__str__
+
     MANUAL   = "MANUAL"
     DAILY    = "DAILY"
     WEEKLY   = "WEEKLY"
