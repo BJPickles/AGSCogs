@@ -61,6 +61,9 @@ def select_address(addresses: Iterable[str], *, allow_private: bool = False) -> 
     """
     result = set()
     for raw in addresses:
+        if "%" in raw:
+            # Scoped IPv6 literals must not reach URL construction.
+            raise ValueError("Scoped DNS addresses are not allowed.")
         try:
             addr = ipaddress.ip_address(raw)
         except ValueError as exc:
