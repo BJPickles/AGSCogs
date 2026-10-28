@@ -1,0 +1,33 @@
+name: Rightmove destructive reconciliation safety
+
+on:
+  pull_request:
+    paths:
+      - 'rightmove/**'
+      - 'tests/test_rightmove_reconciliation.py'
+      - 'tests/fixtures/rightmove_missing_scrapes.json'
+      - '.github/workflows/rightmove-reconciliation.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'rightmove/**'
+      - 'tests/test_rightmove_reconciliation.py'
+      - 'tests/fixtures/rightmove_missing_scrapes.json'
+      - '.github/workflows/rightmove-reconciliation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  rightmove-reconciliation:
+    name: Fixture-based deletion safety regression
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile cog and run fixture-based safe reconciliation tests
+        run: |
+          python -m compileall -q rightmove
+          python -m unittest discover -s tests -p 'test_rightmove_reconciliation.py' -v
