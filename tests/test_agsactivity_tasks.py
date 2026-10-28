@@ -22,7 +22,7 @@ TREE = ast.parse(FILE.read_text(encoding="utf-8"), filename=str(FILE))
 CLASS = next(n for n in TREE.body if isinstance(n, ast.ClassDef) and n.name == "Activities")
 NAMES = {
     "__init__", "_spawn_task", "_schedule_timer", "_cancel_activity_timers",
-    "cog_unload", "_startup_tasks", "stop_activity", "_handle_finalize",
+    "cog_unload", "_startup_tasks", "_monthly_prune_scheduler", "stop_activity", "_handle_finalize",
     "_auto_end_task",
 }
 METHODS = [
@@ -58,7 +58,7 @@ class FakeConfig:
 
 CONFIG = FakeConfig()
 NS = {
-    "asyncio": asyncio, "time": time,
+    "asyncio": asyncio, "time": time, "datetime": datetime, "timezone": timezone,
     "log": logging.getLogger("test.activity_tasks"),
     "Config": SimpleNamespace(get_conf=lambda *args, **kwargs: CONFIG),
     "DEFAULT_GUILD": {"instances": {}},
@@ -177,6 +177,9 @@ class ActivityTaskTests(unittest.IsolatedAsyncioTestCase):
         self.cog._schedule_timer = lambda *args: recorded.append(args)
         # Exercise startup recovery directly while the constructor's startup
         # task remains blocked at wait_until_ready.
+        for task in tuple(self.cog._background_tasks):
+            task.cancel()
+        await asyncio.sleep(0)
         self.bot.wait_until_ready = AsyncMock()
         await self.cog._startup_tasks()
         self.assertEqual(
