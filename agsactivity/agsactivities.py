@@ -14,6 +14,45 @@ from redbot.core.bot import Red
 
 log = logging.getLogger("red.activity")
 
+# Discord limits: 25 fields/embed, 256 characters/field name,
+# 1,024/field value, and 6,000 total embed characters.
+ACTIVITY_LIST_PAGE_FIELDS = 20
+ACTIVITY_LIST_PAGE_CHAR_BUDGET = 5500
+
+
+def _truncate_embed_text(value, limit):
+    """Keep fields within Discord bounds without raising for long titles."""
+    value = str(value)
+    if len(value) > limit:
+        return value[:limit - 1] + "…"
+    return value or "—"
+
+
+def paginate_activity_fields(fields):
+    """Split (name, value) pairs without losing entries or exceeding limits.
+
+    Leave headroom for the embed title and pagination footer.
+    """
+    pages = []
+    current = []
+    characters = 0
+    for name, value in fields:
+        name = _truncate_embed_text(name, 256)
+        value = _truncate_embed_text(value, 1024)
+        size = len(name) + len(value)
+        if current and (
+            len(current) >= ACTIVITY_LIST_PAGE_FIELDS
+            or characters + size > ACTIVITY_LIST_PAGE_CHAR_BUDGET
+        ):
+            pages.append(current)
+            current = []
+            characters = 0
+        current.append((name, value))
+        characters += size
+    if current:
+        pages.append(current)
+    return pages
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ID GENERATION
 # ─────────────────────────────────────────────────────────────────────────────
@@ -843,12 +882,13 @@ class Activities(commands.Cog):
         )
 
     @activity.command(name="list")
-    async def list_activities(self, ctx):
-        """List all activities (live & scheduled)."""
+    async def list_activities(self, ctx, page: int = 1):
+        """List activities one page at a time (use [p]activity list 2)."""
         insts = await self.config.guild(ctx.guild).instances()
         if not insts:
             return await ctx.send("No activities found.")
-        embed = discord.Embed(title="Activities", color=discord.Color.green())
+
+        fields = []
         for iid, inst in insts.items():
             owner = ctx.guild.get_member(inst["owner_id"])
             status = inst["status"]
@@ -858,14 +898,26 @@ class Activities(commands.Cog):
                 if sched and status == "SCHEDULED"
                 else ""
             )
-            embed.add_field(
-                name=f"{iid}: {inst['title']}",
-                value=(
-                    f"Owner: {owner.mention if owner else inst['owner_id']}\n"
-                    f"Status: {status}{sched_str}"
-                ),
-                inline=False,
+            fields.append((
+                f"{iid}: {inst['title']}",
+                f"Owner: {owner.mention if owner else inst['owner_id']}\n"
+                f"Status: {status}{sched_str}",
+            ))
+
+        pages = paginate_activity_fields(fields)
+        if page < 1 or page > len(pages):
+            return await ctx.send(
+                f"⚠️ Invalid page. Choose a page between 1 and {len(pages)}. "
+                "Use `[p]activity list <page>` to navigate."
             )
+
+        embed = discord.Embed(title="Activities", color=discord.Color.green())
+        for name, value in pages[page - 1]:
+            embed.add_field(name=name, value=value, inline=False)
+        embed.set_footer(
+            text=f"Page {page}/{len(pages)} • {len(insts)} activities • "
+                 "Use [p]activity list <page> for another page"
+        )
         await ctx.send(embed=embed)
 
     @activity.command(name="info")

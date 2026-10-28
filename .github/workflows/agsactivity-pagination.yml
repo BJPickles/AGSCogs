@@ -1,0 +1,31 @@
+name: AGS Activity list pagination tests
+
+on:
+  pull_request:
+    paths:
+      - 'agsactivity/**'
+      - 'tests/test_agsactivity_pagination.py'
+      - '.github/workflows/agsactivity-pagination.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'agsactivity/**'
+      - 'tests/test_agsactivity_pagination.py'
+      - '.github/workflows/agsactivity-pagination.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  pagination:
+    name: Activity list pagination regression
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile cog and test Discord-safe page generation
+        run: |
+          python -m compileall -q agsactivity
+          python -m unittest discover -s tests -p 'test_agsactivity_pagination.py' -v
