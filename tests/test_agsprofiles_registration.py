@@ -12,12 +12,15 @@ import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import Optional
 import unittest
 
 try:
+    import discord
     from discord.ext import commands as discord_commands
 except ImportError:  # The unrelated Server Status suite has no discord.py dependency.
     discord_commands = None
+    discord = None
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +58,7 @@ class AGSProfilesRegistrationTests(unittest.TestCase):
         # actual command-group construction and registration use discord.py.
         command_api = SimpleNamespace(
             Cog=discord_commands.Cog,
+            Context=discord_commands.Context,
             command=discord_commands.command,
             group=discord_commands.group,
             guild_only=discord_commands.guild_only,
@@ -63,6 +67,8 @@ class AGSProfilesRegistrationTests(unittest.TestCase):
         namespace = {
             "__name__": "agsprofiles_wiring_test",
             "commands": command_api,
+            "discord": discord,
+            "Optional": Optional,
             "asyncio": asyncio,
             "Path": Path,
             "cog_data_path": lambda cog: Path(self.tempdir.name),
