@@ -1,0 +1,31 @@
+name: Housing Scraper polling safety tests
+
+on:
+  pull_request:
+    paths:
+      - 'agshousingscraper/**'
+      - 'tests/test_housing_scraper_interval.py'
+      - '.github/workflows/housing-scraper-interval.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'agshousingscraper/**'
+      - 'tests/test_housing_scraper_interval.py'
+      - '.github/workflows/housing-scraper-interval.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  polling-safety:
+    name: Polling interval regression
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile scraper and test interval validation / legacy settings
+        run: |
+          python -m compileall -q agshousingscraper
+          python -m unittest discover -s tests -p 'test_housing_scraper_interval.py' -v

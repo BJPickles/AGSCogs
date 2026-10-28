@@ -22,11 +22,25 @@ DEFAULT_KEYWORDS         = [
     "house", "bedrooms", "almshouse"
 ]
 DEFAULT_MODES = ["posts", "keywords", "section_hash", "full_hash"]
+DEFAULT_POLL_INTERVAL_SECONDS = 300
+MIN_POLL_INTERVAL_SECONDS = 60
+MAX_POLL_INTERVAL_SECONDS = 24 * 60 * 60
 FETCH_TIMEOUT_SECONDS = 30
 SCREENSHOT_PAGE_LOAD_TIMEOUT_SECONDS = 30
 SCREENSHOT_SCRIPT_TIMEOUT_SECONDS = 15
 
 log = logging.getLogger("red.agshousingscraper")
+
+
+def safe_poll_interval(seconds):
+    """Bound saved poll settings, including legacy or malformed values.
+
+    Only integer durations are accepted; bad types revert to the default.
+    Out-of-range integers are clamped to the configured safe limits.
+    """
+    if type(seconds) is not int:
+        return DEFAULT_POLL_INTERVAL_SECONDS
+    return max(MIN_POLL_INTERVAL_SECONDS, min(seconds, MAX_POLL_INTERVAL_SECONDS))
 
 
 class AGSHousingScraper(commands.Cog):
@@ -38,7 +52,7 @@ class AGSHousingScraper(commands.Cog):
         # register per-guild defaults
         self.config.register_guild(
             url="https://www.eost.org.uk/housing",
-            poll_interval=300,
+            poll_interval=DEFAULT_POLL_INTERVAL_SECONDS,
             section_selector=DEFAULT_SECTION_SELECTOR,
             full_selector=DEFAULT_FULL_SELECTOR,
             detection_modes=DEFAULT_MODES.copy(),
@@ -149,7 +163,18 @@ class AGSHousingScraper(commands.Cog):
             stats["seen_posts"]    = len(await settings.seen_posts())
             stats["seen_keywords"] = len(await settings.seen_keywords())
             await self._log_to_channel(guild, stats)
-            await asyncio.sleep(await settings.poll_interval())
+
+            # Validate at the point of use too: older saved configs may still
+            # contain 0, negative or malformed intervals from before this fix.
+            stored_interval = await settings.poll_interval()
+            delay = safe_poll_interval(stored_interval)
+            if type(stored_interval) is not int or stored_interval != delay:
+                log.warning(
+                    "Correcting unsafe Housing Scraper poll interval for guild %s: %r -> %ss",
+                    guild.id, stored_interval, delay,
+                )
+                await settings.poll_interval.set(delay)
+            await asyncio.sleep(delay)
 
     # ───────────── Detection Pipeline ─────────────
 
@@ -449,7 +474,14 @@ class AGSHousingScraper(commands.Cog):
 
     @agshousingscraper.command()
     async def interval(self, ctx, seconds: int):
-        """Set polling interval (seconds)."""
+        """Set polling interval from 60 seconds to 24 hours."""
+        if not MIN_POLL_INTERVAL_SECONDS <= seconds <= MAX_POLL_INTERVAL_SECONDS:
+            return await ctx.send(
+                f"⚠️ Polling interval must be between {MIN_POLL_INTERVAL_SECONDS} "
+                f"and {MAX_POLL_INTERVAL_SECONDS} seconds (24 hours). "
+                "Your existing interval was not changed."
+            )
+
         await self.config.guild(ctx.guild).poll_interval.set(seconds)
         t = self.monitor_tasks.pop(ctx.guild.id, None)
         if t:
