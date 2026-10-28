@@ -6,7 +6,6 @@ import hashlib
 import datetime
 
 import aiohttp
-import async_timeout
 import discord
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -22,6 +21,7 @@ DEFAULT_KEYWORDS         = [
     "house", "bedrooms", "almshouse"
 ]
 DEFAULT_MODES = ["posts", "keywords", "section_hash", "full_hash"]
+FETCH_TIMEOUT_SECONDS = 30
 
 
 class AGSHousingScraper(commands.Cog):
@@ -156,11 +156,13 @@ class AGSHousingScraper(commands.Cog):
         keywords    = stats["keywords"]
         use_ss      = cfg["use_screenshot"]
 
-        # 1) Fetch HTML
-        async with aiohttp.ClientSession() as session:
-            with async_timeout.timeout(30):
-                r = await session.get(url, headers={"User-Agent": "Mozilla/5.0"})
-                html = await r.text()
+        # 1) Fetch HTML. The timeout covers response headers AND body reading.
+        # Closing both context managers releases the connection even on errors.
+        timeout = aiohttp.ClientTimeout(total=FETCH_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as response:
+                response.raise_for_status()
+                html = await response.text()
         soup = BeautifulSoup(html, "html.parser")
 
         # 2) POSTS DETECTION
