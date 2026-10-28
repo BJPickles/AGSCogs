@@ -23,7 +23,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 | **AUD-001** | **Fixed in source in [PR #3](https://github.com/BJPickles/AGSCogs/pull/3); pending live Red/Discord verification** | Bot-owner-only commands, per-target private access opt-in, validated and pinned destinations, redirect suppression, and regression tests. See dated entry below. |
 | **AUD-002** | **Fixed in source in [PR #4](https://github.com/BJPickles/AGSCogs/pull/4); isolated CI passed; pending real Red/Discord verification** | All command groups are registered on a single inherited cog; no separate command-class instances. See dated entry below. |
 | **AUD-003–AUD-004** | Open (unchanged) | Housing Scraper timeout handling and blocking Selenium. |
-| **AUD-005** | **Fixed in source by the Python 3.9 compatibility PR; CI/runtime verification pending** | `StrEnum` replaced with `str, Enum` while retaining string representation; optional and union annotations converted to Python 3.9-compatible `typing` forms. |
+| **AUD-005** | **Fixed in source in [PR #5](https://github.com/BJPickles/AGSCogs/pull/5); CI/runtime verification pending** | `StrEnum` replaced with `str, Enum` while retaining string representation; optional and union annotations converted to Python 3.9-compatible `typing` forms. |
 | **AUD-006–AUD-017** | Open (unchanged) | AUD-006 (undeclared LevelUp and other dependencies) can still block AGSProfiles from loading. AUD-007 (global Server Status configuration) remains separately open. |
 
 ## 2026-10-28 — Baseline audit (all 11 cogs)
@@ -121,7 +121,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 - **Validation:** Added a dependency-isolated regression suite that executes the repository's real class definitions using discord.py's actual Cog metaclass/decorators, constructs the cog, and checks top-level commands, nested command groups, aliases and listener registration. The isolated suite stubs Red-only permission decorators and external model imports, so it is **not** a full Red runtime or permissions integration test. The dedicated GitHub Actions Python 3.11/discord.py registration job passed ([run](https://github.com/BJPickles/AGSCogs/actions/runs/40746898565)); the separately existing Server Status and rolling-audit checks also passed on the same revision. No live bot or LevelUp integration run was performed.
 - **Next steps:** Run CI; install and reload on a staging Red bot with compatible Python/LevelUp versions; verify `[p]help agsnapshot`, `[p]agsleaderboard current`, `[p]agprofile`, `[p]agsicons list`, and `[p]agsprofilestatus`. Follow up on AUD-005 and AUD-006.
 
-### 2026-10-28 — AUD-005: AGSProfiles Python 3.9 model compatibility (fix PR)
+### 2026-10-28 — [PR #5](https://github.com/BJPickles/AGSCogs/pull/5): AUD-005 AGSProfiles Python 3.9 model compatibility
 
 - **Scope:** `agsprofiles/models.py`, `agsprofiles/common.py`, `tests/test_agsprofiles_python_compat.py`, and new `.github/workflows/agsprofiles-python-compat.yml`. Original source-linked AUD-005 finding is preserved.
 - **Finding status:** AUD-005 fixed in source; Python-version matrix CI and staging Red/LevelUp validation still pending. No other audit finding is marked resolved.
