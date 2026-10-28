@@ -2,6 +2,14 @@
 
 A collection of custom cogs for [Red-DiscordBot](https://github.com/Cog-Creators/Red-DiscordBot) 3.5, built for the AEGIS Game Studios Discord community. The cogs cover community activities, scheduled posts, voice chat, moderation, game server monitoring, and property alerts.
 
+## Rolling cog audit — mandatory PR policy
+
+The repository maintains an ongoing, historical [Cog Audit History](AUDIT_HISTORY.md) with dated findings, severity, evidence, and follow-up status for **all 11 cogs**.
+
+**Every future pull request MUST update `AUDIT_HISTORY.md` in the same PR**, including documentation-only or housekeeping changes. Append a dated entry covering affected cogs, risks, finding IDs (or an explicit no-findings-change statement), and what was or was not tested. Preserve earlier records: fix PRs should link back to the original finding and record its resolution, not delete history.
+
+The [PR template](.github/pull_request_template.md) requires a checklist and the [audit-log workflow](.github/workflows/require-audit-history.yml) fails when a PR omits a change to the log. Reviewers must check entry quality; to block merging on failure, maintainers must make that status check required in GitHub branch protection/rulesets.
+
 ## Available cogs
 
 | Cog | What it does | Main command |
