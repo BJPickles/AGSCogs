@@ -81,7 +81,7 @@
 
 ## Dated rolling updates
 
-### 2026-10-28 — Baseline audit documentation PR (initial entry)
+### 2026-10-28 — [PR #2](https://github.com/BJPickles/AGSCogs/pull/2): Baseline audit documentation (initial entry)
 
 - **Scope:** All 11 cogs and repository delivery practices, at pinned baseline commit f2d04f12bc69.
 - **Findings:** AUD-001 through AUD-017 opened; none resolved by this documentation PR.
