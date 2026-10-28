@@ -61,10 +61,8 @@ class FakeScraper:
 class HousingFetchTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.app = web.Application()
-        self.app.router.add_get("/ok", lambda request: web.Response(
-            text="<html><body>Available housing</body></html>", content_type="text/html"))
-        self.app.router.add_get("/error", lambda request: web.Response(
-            status=503, text="<html><body>Maintenance page</body></html>"))
+        self.app.router.add_get("/ok", self.success)
+        self.app.router.add_get("/error", self.http_error)
         self.app.router.add_get("/slow-header", self.slow_header)
         self.app.router.add_get("/slow-body", self.slow_body)
         self.runner = web.AppRunner(self.app)
@@ -78,6 +76,14 @@ class HousingFetchTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.runner.cleanup()
+
+    async def success(self, request):
+        return web.Response(
+            text="<html><body>Available housing</body></html>", content_type="text/html"
+        )
+
+    async def http_error(self, request):
+        return web.Response(status=503, text="<html><body>Maintenance page</body></html>")
 
     async def slow_header(self, request):
         await asyncio.sleep(0.2)
