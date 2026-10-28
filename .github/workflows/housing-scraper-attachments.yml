@@ -1,0 +1,31 @@
+name: Housing Scraper attachment lifecycle tests
+
+on:
+  pull_request:
+    paths:
+      - 'agshousingscraper/**'
+      - 'tests/test_housing_scraper_attachments.py'
+      - '.github/workflows/housing-scraper-attachments.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'agshousingscraper/**'
+      - 'tests/test_housing_scraper_attachments.py'
+      - '.github/workflows/housing-scraper-attachments.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  attachments:
+    name: Screenshot attachment regression
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile source and test screenshot lifecycle
+        run: |
+          python -m compileall -q agshousingscraper
+          python -m unittest discover -s tests -p 'test_housing_scraper_attachments.py' -v
