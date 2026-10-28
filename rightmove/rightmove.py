@@ -33,6 +33,34 @@ MAX_PRICE_HISTORY = 20
 MAX_SEARCH_PAGES = 60
 PAGE_SIZE = 24
 
+
+def missing_removal_guard(scrape, tracked_count: int) -> Tuple[bool, Optional[str]]:
+    """Fail closed when the scrape is unsafe for missing-listing reconciliation.
+
+    A legitimately empty Rightmove search is ambiguous when the bot already
+    tracks properties: an unexpected layout change can look like zero results.
+    Require manual review instead of ageing out the entire cache.
+    """
+    if not scrape.complete:
+        return False, "Scrape was incomplete; no missing counters were changed and no channels were deleted."
+    if tracked_count and not scrape.properties:
+        return (
+            False,
+            "Scrape reported zero properties despite an existing tracked cache. "
+            "Missing counters and channel removals were paused for manual review.",
+        )
+    return True, None
+
+
+def preview_missing_candidates(cache, threshold: int):
+    """Read-only snapshot of records at risk on the *next* complete missing scrape."""
+    return sorted(
+        str(pid)
+        for pid, state in cache.items()
+        if isinstance(state, dict)
+        and max(0, _safe_int(state.get("missing_count")) or 0) + 1 >= threshold
+    )
+
 DEFAULT_BANNED_PROPERTY_TYPES = [
     "studio",
     "land",
@@ -2382,6 +2410,57 @@ class RightmoveCog(commands.Cog):
 
         return len(changed_channel_ids), errors
 
+    async def _reconcile_missing_properties(
+        self,
+        guild: discord.Guild,
+        guild_config,
+        cache: Dict[str, Dict[str, Any]],
+        accepted_ids: set[str],
+        settings: Dict[str, Any],
+    ) -> Tuple[int, int, List[str]]:
+        """Age out absent listings only after the caller has verified scrape safety.
+
+        Persist every individual decision so a cancelled run does not lose its
+        last successful deletion/counter increment. Verify the channel's own
+        property marker before deleting it: stale cache IDs must never delete
+        unrelated channels.
+        """
+        removed = 0
+        missing_marked = 0
+        errors: List[str] = []
+        threshold = max(1, int(settings.get("missing_confirmations", 3)))
+        for pid in list(cache):
+            if pid in accepted_ids:
+                continue
+            state = self._normalise_cached_state(pid, cache[pid])
+            state["missing_count"] = int(state.get("missing_count", 0)) + 1
+            missing_marked += 1
+            if state["missing_count"] >= threshold:
+                channel_id = _safe_int(state.get("channel_id"))
+                channel = guild.get_channel(channel_id) if channel_id else None
+                if isinstance(channel, discord.TextChannel):
+                    if _channel_property_id(channel) != pid:
+                        errors.append(
+                            f"Refused to delete channel {channel_id} for prop-{pid}: "
+                            "channel property ID does not match the cached property."
+                        )
+                        cache[pid] = state
+                        await guild_config.properties.set(cache)
+                        continue
+                    try:
+                        await channel.delete(reason="Rightmove listing absent from complete scrapes")
+                    except (discord.Forbidden, discord.HTTPException) as exc:
+                        errors.append(f"Could not delete prop-{pid}: {exc}")
+                        cache[pid] = state
+                        await guild_config.properties.set(cache)
+                        continue
+                cache.pop(pid, None)
+                removed += 1
+            else:
+                cache[pid] = state
+            await guild_config.properties.set(cache)
+        return removed, missing_marked, errors
+
     async def _run_scrape(
         self,
         guild: discord.Guild,
@@ -2533,35 +2612,19 @@ class RightmoveCog(commands.Cog):
                         if old_raw and not had_valid_channel and not made_channel:
                             recovered += 1
 
-                    # Missing listings are only counted after a demonstrably complete scrape.
+                    # The destructive pass is isolated for fixture-based tests.
+                    # Even a nominally complete zero-result page is unsafe if
+                    # this guild has tracked property channels.
+                    removals_safe, guard_message = missing_removal_guard(scrape, len(cache))
+                    if guard_message:
+                        errors.append(guard_message)
                     removed = 0
                     missing_marked = 0
-                    if scrape.complete:
-                        accepted_ids = set(accepted)
-                        threshold = max(1, int(settings.get("missing_confirmations", 3)))
-                        for pid in list(cache):
-                            if pid in accepted_ids:
-                                continue
-                            state = self._normalise_cached_state(pid, cache[pid])
-                            state["missing_count"] = int(state.get("missing_count", 0)) + 1
-                            missing_marked += 1
-                            if state["missing_count"] >= threshold:
-                                channel_id = _safe_int(state.get("channel_id"))
-                                channel = guild.get_channel(channel_id) if channel_id else None
-                                if isinstance(channel, discord.TextChannel):
-                                    try:
-                                        await channel.delete(reason="Rightmove listing absent from complete scrapes")
-                                    except (discord.Forbidden, discord.HTTPException) as exc:
-                                        errors.append(f"Could not delete prop-{pid}: {exc}")
-                                        cache[pid] = state
-                                        continue
-                                cache.pop(pid, None)
-                                removed += 1
-                            else:
-                                cache[pid] = state
-                            await guild_config.properties.set(cache)
-                    else:
-                        errors.append("Scrape was incomplete; no missing counters were changed and no channels were deleted.")
+                    if removals_safe:
+                        removed, missing_marked, removal_errors = await self._reconcile_missing_properties(
+                            guild, guild_config, cache, set(accepted), settings
+                        )
+                        errors.extend(removal_errors)
 
                     await guild_config.ignored_properties.set(ignored)
                     await guild_config.properties.set(cache)
@@ -2571,17 +2634,17 @@ class RightmoveCog(commands.Cog):
 
                     now = _utc_ts()
                     settings = await guild_config.settings()
-                    if scrape.complete:
+                    if removals_safe:
                         settings["last_success_ts"] = now
                         settings["consecutive_failures"] = 0
                     else:
-                        # Keep last_success_ts unchanged so the scheduler retries later
-                        # instead of treating a partial scrape as the day's success.
+                        # Keep last_success_ts unchanged for incomplete or
+                        # suspicious empty results, so the scheduler retries.
                         settings["consecutive_failures"] = int(settings.get("consecutive_failures", 0)) + 1
                     settings["last_summary"] = _encode_summary({
                         "timestamp": now,
                         "source": source,
-                        "complete": scrape.complete,
+                        "complete": removals_safe,
                         "expected": scrape.expected_count,
                         "parsed": len(scrape.properties),
                         "accepted": len(accepted),
@@ -2604,7 +2667,8 @@ class RightmoveCog(commands.Cog):
                         f"{len(accepted)} accepted, {created} created, {updated} updated, "
                         f"{unchanged} unchanged, {removed} removed, {moved} moved, "
                         f"{sum(1 for state in cache.values() if isinstance(state, dict) and state.get('scheme_highlighted'))} highlighted. "
-                        f"Rightmove parse complete: **{scrape.complete}**."
+                        f"Rightmove parse complete: **{scrape.complete}**. "
+                        f"Safe for missing reconciliation: **{removals_safe}**."
                     )
                     if scrape.errors:
                         summary += "\nScraper notes: " + " | ".join(scrape.errors[:5])
@@ -2791,6 +2855,28 @@ class RightmoveCog(commands.Cog):
         )
         await ctx.send(
             f"✅ A property must be absent from {confirmations} complete scrape(s) before its channel is removed."
+        )
+
+    @rm.command(name="missingpreview")
+    async def rm_missingpreview(self, ctx: commands.Context) -> None:
+        """Read-only snapshot: records that could expire if absent next scrape."""
+        guild_config = self.config.guild(ctx.guild)
+        settings = await guild_config.settings()
+        cache = await guild_config.properties()
+        threshold = max(1, int(settings.get("missing_confirmations", 3)))
+        at_risk = preview_missing_candidates(cache, threshold)
+        names = ", ".join(f"`prop-{pid}`" for pid in at_risk[:12]) or "None"
+        await ctx.send(
+            f"🔎 **Rightmove removal preview (read-only)**\n"
+            f"Tracked: **{len(cache)}** • confirmations required: **{threshold}**.\n"
+            f"**{len(at_risk)}** record(s) have enough existing missing confirmations "
+            "to be eligible for removal **only if they are also absent from the next "
+            f"safe, complete scrape**.\n{names}"
+            + (f" (and {len(at_risk) - 12} more)" if len(at_risk) > 12 else "")
+            + "\nNo scraping, counters, channel deletions or configuration writes "
+              "were performed. This is not a prediction of the next scrape. "
+              "Use `rm stop` to disable monitoring and back up Red's data "
+              "before changing deletion settings."
         )
 
     @rm.command(name="start")
