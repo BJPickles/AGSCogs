@@ -20,7 +20,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 
 | ID | Current state | Follow-up |
 | --- | --- | --- |
-| **AUD-001** | **Fixed in source in the security PR; pending live Red/Discord verification** | Bot-owner-only commands, per-target private access opt-in, validated and pinned destinations, redirect suppression, and regression tests. See dated entry below. |
+| **AUD-001** | **Fixed in source in [PR #3](https://github.com/BJPickles/AGSCogs/pull/3); pending live Red/Discord verification** | Bot-owner-only commands, per-target private access opt-in, validated and pinned destinations, redirect suppression, and regression tests. See dated entry below. |
 | **AUD-002–AUD-017** | Open (unchanged) | Refer to the original findings and future dated updates. AUD-007 (global Server Status configuration) remains separately open. |
 
 ## 2026-10-28 — Baseline audit (all 11 cogs)
@@ -100,7 +100,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 - **Validation:** Static source inspection, metadata/tree review, and source-linked finding descriptions. No Red/Discord runtime or automated tests were executed.
 - **Outstanding:** Every finding remains open until independently tested and addressed in a follow-up PR. The rolling log must be updated again in that PR.
 
-### 2026-10-28 — AUD-001: restrict Server Status and protect HTTP destinations (security PR)
+### 2026-10-28 — [PR #3](https://github.com/BJPickles/AGSCogs/pull/3): AUD-001 Server Status security fix
 
 - **Scope:** `agsserverstatus/agsserverstatus.py`, new `agsserverstatus/target_security.py`, `agsserverstatus/README.md`, `tests/test_serverstatus_security.py`, and test workflow. Original audited source: [AUD-001](#high-priority-findings).
 - **Status:** AUD-001 fixed in source; await CI result and a real Red/Discord validation before claiming production verification. AUD-007 is **not** resolved: configuration remains global across guilds. Other findings are unchanged.
