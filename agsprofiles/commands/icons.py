@@ -9,7 +9,7 @@ from ..models import GuildConfig
 _ = Translator("AGSProfiles", __file__)
 
 
-class IconCommands(commands.Cog):
+class IconCommands:
     """Manage role→icon mappings for AGSProfiles."""
 
     @commands.group(name="agsicons", aliases=["agsicon"])

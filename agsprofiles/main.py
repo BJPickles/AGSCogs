@@ -9,15 +9,18 @@ import discord
 from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
+from redbot.core.i18n import Translator, cog_i18n
 
 from .models import AGSConfig, GuildConfig, Snapshot, SnapshotMeta
 from .common import generate_snapshot_id, utc_timestamp
-from .commands import SnapshotCommands, LeaderboardCommands
+from .commands import Commands
 
 log = logging.getLogger("red.agsprofiles")
+_ = Translator("AGSProfiles", __file__)
 
 
-class AGSProfiles(commands.Cog):
+@cog_i18n(_)
+class AGSProfiles(Commands, commands.Cog):
     """
     AGSProfiles cog.
 
@@ -33,10 +36,6 @@ class AGSProfiles(commands.Cog):
 
         self._save_lock = asyncio.Lock()
         self.config = AGSConfig()
-
-        # attach command modules as composition (NOT inheritance)
-        self.snapshots = SnapshotCommands(self)
-        self.leaderboard = LeaderboardCommands(self)
 
         self._load_all_guilds()
 
