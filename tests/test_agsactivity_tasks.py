@@ -68,6 +68,22 @@ exec(compile(MODULE, str(FILE), "exec"), NS)
 Harness = NS["TestActivities"]
 
 
+class CancellationSafetyTests(unittest.TestCase):
+    def test_background_workers_do_not_swallow_task_cancellation(self):
+        # In Python 3.11 CancelledError is BaseException: bare except clauses
+        # swallow it and allow a task to continue posting after cog unload.
+        for method_name in ("_auto_end_task", "_schedule_start", "_refresh_all_dms"):
+            source_method = next(
+                n for n in CLASS.body
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == method_name
+            )
+            catches_all = [
+                n for n in ast.walk(source_method)
+                if isinstance(n, ast.ExceptHandler) and n.type is None
+            ]
+            self.assertFalse(catches_all, method_name)
+
+
 class ActivityTaskTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         CONFIG.contents.clear()
