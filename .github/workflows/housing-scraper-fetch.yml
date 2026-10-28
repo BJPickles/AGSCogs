@@ -1,0 +1,31 @@
+name: Housing Scraper HTTP fetch tests
+
+on:
+  pull_request:
+    paths:
+      - 'agshousingscraper/**'
+      - 'tests/test_housing_scraper_fetch.py'
+      - '.github/workflows/housing-scraper-fetch.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'agshousingscraper/**'
+      - 'tests/test_housing_scraper_fetch.py'
+      - '.github/workflows/housing-scraper-fetch.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  http-fetch:
+    name: HTTP fetch regression
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install HTTP and HTML dependencies
+        run: python -m pip install 'aiohttp>=3.9,<4' 'beautifulsoup4>=4.12,<5'
+      - name: Run local HTTP response and timeout tests
+        run: python -m unittest discover -s tests -p 'test_housing_scraper_fetch.py' -v
