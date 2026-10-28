@@ -11,6 +11,8 @@ from redbot.core import Config, commands
 from redbot.core.bot import Red
 from redbot.core.utils.chat_formatting import box
 
+FAILED_SEND_RETRY_SECONDS = 60
+
 DEFAULT_PRE_MESSAGES = [
     "Hey everyone, it's dad joke time:",
     "Brace yourselves—dad joke incoming:",
@@ -79,6 +81,28 @@ def compute_last_daily(
     return candidate
 
 
+def choose_next_prefix(data: dict) -> tuple[str, list[int], int]:
+    """Choose the next prefix without changing persisted rotation state.
+
+    The daily sender commits the new rotation only after Discord accepts its
+    message; an unsuccessful send must not consume a prefix.
+    """
+    pre_messages = data.get("pre_messages", DEFAULT_PRE_MESSAGES) or []
+    count = len(pre_messages)
+    if count == 0:
+        return "", [], 0
+
+    order = data.get("prefix_order") or []
+    index = int(data.get("prefix_index", 0) or 0)
+    if len(order) != count or set(order) != set(range(count)) or not 0 <= index < count:
+        order = list(range(count))
+        random.shuffle(order)
+        index = 0
+
+    prefix = pre_messages[order[index]] or ""
+    return prefix, order, index + 1
+
+
 class DailyDadJokes(commands.Cog):
     """
     Fetch random dad jokes on command or post daily with rotating prefixes.
@@ -105,6 +129,9 @@ class DailyDadJokes(commands.Cog):
         )
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
+        # In-memory throttle; scheduling already limits attempts to five
+        # minutes after the configured daily post time.
+        self._failed_post_retry_at: dict[int, datetime] = {}
 
     async def cog_load(self):
         # Start the background loop
@@ -168,22 +195,47 @@ class DailyDadJokes(commands.Cog):
                     # Re-check under lock
                     fresh = await self.config.guild(guild).all()
                     if int(fresh.get("last_posted_unix", 0) or 0) < ts:
+                        retry_at = self._failed_post_retry_at.get(guild.id)
+                        if retry_at is not None and now_utc < retry_at:
+                            return
+
                         joke = await self._fetch_joke()
                         if not joke:
                             return
-                        prefix = await self._get_next_prefix(guild, fresh)
+                        prefix, order, index = choose_next_prefix(fresh)
                         content = f"{prefix}\n`{joke}`" if prefix else f"`{joke}`"
                         try:
                             await channel.send(content)
                         except discord.Forbidden:
                             self.bot.logger.warning(
-                                "DailyDadJokes cannot send to %s in guild %s", chan_id, guild.id
+                                "DailyDadJokes cannot send to %s in guild %s; "
+                                "will retry in %ss if still inside the posting window",
+                                chan_id, guild.id, FAILED_SEND_RETRY_SECONDS,
                             )
+                            self._failed_post_retry_at[guild.id] = (
+                                now_utc + timedelta(seconds=FAILED_SEND_RETRY_SECONDS)
+                            )
+                            return
                         except Exception:
                             self.bot.logger.exception(
-                                "DailyDadJokes failed send in %s:%s", guild.id, chan_id
+                                "DailyDadJokes failed send in %s:%s; "
+                                "will retry in %ss if still inside the posting window",
+                                guild.id, chan_id, FAILED_SEND_RETRY_SECONDS,
                             )
+                            self._failed_post_retry_at[guild.id] = (
+                                now_utc + timedelta(seconds=FAILED_SEND_RETRY_SECONDS)
+                            )
+                            return
+
+                        # A successful send is the only event that advances
+                        # the marker and consumes the chosen prefix. Record
+                        # delivery first so a prefix-state write failure cannot
+                        # cause a second joke to be sent.
                         await self.config.guild(guild).last_posted_unix.set(ts)
+                        self._failed_post_retry_at.pop(guild.id, None)
+                        if order:
+                            await self.config.guild(guild).prefix_order.set(order)
+                            await self.config.guild(guild).prefix_index.set(index)
 
     async def _fetch_joke(self) -> str | None:
         """Fetches a plain‐text joke or returns None on failure."""
@@ -205,24 +257,11 @@ class DailyDadJokes(commands.Cog):
         """
         if data is None:
             data = await self.config.guild(guild).all()
-        pre_messages = data.get("pre_messages", DEFAULT_PRE_MESSAGES) or []
-        N = len(pre_messages)
-        if N == 0:
-            return ""
-        prefix_order = data.get("prefix_order") or []
-        prefix_index = int(data.get("prefix_index", 0) or 0)
-        # If we've exhausted the cycle (or never built one), reshuffle
-        if not prefix_order or prefix_index >= N:
-            prefix_order = list(range(N))
-            random.shuffle(prefix_order)
-            prefix_index = 0
-        idx = prefix_order[prefix_index]
-        prefix_index += 1
-        # Save back our updated cycle state
-        await self.config.guild(guild).prefix_order.set(prefix_order)
-        await self.config.guild(guild).prefix_index.set(prefix_index)
-        # Return the chosen prefix (empty string → raw joke)
-        return pre_messages[idx] or ""
+        prefix, order, index = choose_next_prefix(data)
+        if order:
+            await self.config.guild(guild).prefix_order.set(order)
+            await self.config.guild(guild).prefix_index.set(index)
+        return prefix
 
     # ─── COMMANDS ────────────────────────────────────────────────────────────────
 
