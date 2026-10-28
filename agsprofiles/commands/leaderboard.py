@@ -33,7 +33,7 @@ GLOBAL_STAT_MAP = {
 }
 
 
-class LeaderboardCommands(commands.Cog):
+class LeaderboardCommands:
     """Year-of-review leaderboard commands."""
 
     @commands.group(name="agsleaderboard", aliases=["agslb", "profileleaderboard"])
