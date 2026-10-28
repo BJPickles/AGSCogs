@@ -58,7 +58,7 @@ def preview_missing_candidates(cache, threshold: int):
         str(pid)
         for pid, state in cache.items()
         if isinstance(state, dict)
-        and int(state.get("missing_count") or 0) + 1 >= threshold
+        and max(0, _safe_int(state.get("missing_count")) or 0) + 1 >= threshold
     )
 
 DEFAULT_BANNED_PROPERTY_TYPES = [
@@ -2867,13 +2867,13 @@ class RightmoveCog(commands.Cog):
         at_risk = preview_missing_candidates(cache, threshold)
         names = ", ".join(f"`prop-{pid}`" for pid in at_risk[:12]) or "None"
         await ctx.send(
-            f"🔎 **Rightmove removal preview (read-only)**\\n"
-            f"Tracked: **{len(cache)}** • confirmations required: **{threshold}**.\\n"
+            f"🔎 **Rightmove removal preview (read-only)**\n"
+            f"Tracked: **{len(cache)}** • confirmations required: **{threshold}**.\n"
             f"**{len(at_risk)}** record(s) have enough existing missing confirmations "
             "to be eligible for removal **only if they are also absent from the next "
-            f"safe, complete scrape**.\\n{names}"
+            f"safe, complete scrape**.\n{names}"
             + (f" (and {len(at_risk) - 12} more)" if len(at_risk) > 12 else "")
-            + "\\nNo scraping, counters, channel deletions or configuration writes "
+            + "\nNo scraping, counters, channel deletions or configuration writes "
               "were performed. This is not a prediction of the next scrape. "
               "Use `rm stop` to disable monitoring and back up Red's data "
               "before changing deletion settings."
