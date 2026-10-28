@@ -19,7 +19,7 @@ permissions:
 jobs:
   python-compat:
     name: Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
