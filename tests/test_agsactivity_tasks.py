@@ -59,6 +59,7 @@ class FakeConfig:
 CONFIG = FakeConfig()
 NS = {
     "asyncio": asyncio, "time": time, "datetime": datetime, "timezone": timezone,
+    "Red": object,
     "log": logging.getLogger("test.activity_tasks"),
     "Config": SimpleNamespace(get_conf=lambda *args, **kwargs: CONFIG),
     "DEFAULT_GUILD": {"instances": {}},
