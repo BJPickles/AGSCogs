@@ -30,7 +30,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 | **AUD-008** | **Fixed in source in [PR #9](https://github.com/BJPickles/AGSCogs/pull/9); isolated CI passed, live Red verification pending** | Command rejects intervals outside 60–86,400 seconds, and the monitor repairs legacy unsafe settings before sleeping. |
 | **AUD-009** | **Fixed in source in [PR #10](https://github.com/BJPickles/AGSCogs/pull/10); all isolated CI passed; live Red/Discord verification pending** | Independent upload handles for each destination, explicit file closure, warnings on failed DM delivery, cleanup across channel/DM/force/weekly paths. |
 | **AUD-010** | **Fixed in source in [PR #11](https://github.com/BJPickles/AGSCogs/pull/11); isolated CI passed, live Red/Discord verification pending** | Daily marker and prefix rotation only advance after a successful send; transient send failures retry at most once per minute during the five-minute daily posting window. |
-| **AUD-011** | **Fixed in source in the AGS Activity task-lifecycle PR; CI and live Red verification pending** | All startup, prune, timer, and DM-refresh tasks tracked and cancelled on unload; timer replacement and missed-start recovery added. |
+| **AUD-011** | **Fixed in source in [PR #12](https://github.com/BJPickles/AGSCogs/pull/12); CI and live Red verification pending** | All startup, prune, timer, and DM-refresh tasks tracked and cancelled on unload; timer replacement and missed-start recovery added. |
 | **AUD-012–AUD-017** | Open (unchanged) | Activity embeds, voice-state task handling, regression coverage and other baseline findings remain open. |
 
 ## 2026-10-28 — Baseline audit (all 11 cogs)
@@ -196,7 +196,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 - **Validation:** The [Daily Dad Joke CI regression run](https://github.com/BJPickles/AGSCogs/actions/runs/40766313036) passed 11 stdlib-only tests executing actual production function bodies via Python AST, with fake guild config, logger, Discord errors and channel. Cases cover success/duplicate avoidance, Forbidden and generic failures, a 60-second retry gate, five-minute window expiry, missing joke, disabled/no-channel paths, prefix-state write failure, concurrent checks and manual prefix rotation. The initially failing window-expiry test used a timestamp already outside the configured window; corrected test timestamps passed. Server Status and audit-history checks also passed. Tests **do not** install Red, call Discord or hit the live joke API.
 - **Residual risk:** Discord may accept a send but the client/network may throw before confirmation, so exactly-once posting across ambiguous network failures cannot be guaranteed. Config storage failure immediately after a confirmed send can also leave an old marker and cause a duplicate; a production integration smoke test remains necessary. AUD-011–AUD-017 and AUD-007 remain separately open.
 
-### 2026-10-28 — AUD-011: AGS Activity background task lifecycle and restart recovery (fix PR)
+### 2026-10-28 — [PR #12](https://github.com/BJPickles/AGSCogs/pull/12): AUD-011 AGS Activity task lifecycle
 
 - **Scope:** `agsactivity/agsactivities.py`, new `tests/test_agsactivity_tasks.py`, and new `.github/workflows/agsactivity-tasks.yml`. Original baseline AUD-011 evidence remains unchanged.
 - **Finding state:** AUD-011 fixed in source; automated and live Red/Discord verification pending. AUD-012–AUD-017, AUD-007 and all other open findings remain unchanged.
