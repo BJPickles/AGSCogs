@@ -32,6 +32,18 @@ SCREENSHOT_SCRIPT_TIMEOUT_SECONDS = 15
 log = logging.getLogger("red.agshousingscraper")
 
 
+def delete_screenshot(path):
+    """Remove a generated screenshot without masking an earlier send error."""
+    if path is None:
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        log.exception("Failed to remove Housing Scraper screenshot %s", path)
+
+
 def safe_poll_interval(seconds):
     """Bound saved poll settings, including legacy or malformed values.
 
@@ -122,14 +134,12 @@ class AGSHousingScraper(commands.Cog):
                         color=discord.Color.gold(),
                         timestamp=run_at
                     )
-                    file = discord.File(ss_path, filename="snapshot.png")
                     emb.set_image(url="attachment://snapshot.png")
-                    await ch.send(embed=emb, file=file)
+                    await self._send_with_screenshot(ch, embed=emb, screenshot_path=ss_path)
                 except Exception as e:
                     await ch.send(f"❌ Weekly snapshot failed:\n```{e}```")
                 finally:
-                    if ss_path and os.path.exists(ss_path):
-                        os.remove(ss_path)
+                    delete_screenshot(ss_path)
 
     # ───────────── Monitor Loop ─────────────
 
@@ -398,26 +408,54 @@ class AGSHousingScraper(commands.Cog):
                     pass
                 raise
 
+    async def _send_with_screenshot(self, destination, *, embed, screenshot_path=None, content=None):
+        """Open a fresh Discord upload for exactly one send, then close it."""
+        attachment = None
+        try:
+            if screenshot_path:
+                attachment = discord.File(screenshot_path, filename="snapshot.png")
+            await destination.send(content=content, embed=embed, file=attachment)
+        finally:
+            if attachment is not None:
+                attachment.close()
+
     async def dispatch_alert(self, guild, content, embed, screenshot_path=None):
-        """Send alert embed (and optional screenshot) to alert channel/DM/role."""
-        cfg = await self.config.guild(guild).all()
-        ch  = guild.get_channel(cfg["channel_id"]) if cfg["channel_id"] else None
-        usr = self.bot.get_user(cfg["dm_user_id"])    if cfg["dm_user_id"] else None
-        if cfg["role_id"] and ch:
-            content = f"<@&{cfg['role_id']}>"
-        file = None
-        if screenshot_path:
-            file = discord.File(screenshot_path, filename="snapshot.png")
-            embed.set_image(url="attachment://snapshot.png")
-        if ch:
-            await ch.send(content=content, embed=embed, file=file)
-        if usr:
-            try:
-                await usr.send(embed=embed, file=file)
-            except:
-                pass
-        if file and os.path.exists(screenshot_path):
-            os.remove(screenshot_path)
+        """Send independent channel and DM uploads; always clean the PNG."""
+        try:
+            cfg = await self.config.guild(guild).all()
+            ch = guild.get_channel(cfg["channel_id"]) if cfg["channel_id"] else None
+            usr = self.bot.get_user(cfg["dm_user_id"]) if cfg["dm_user_id"] else None
+
+            if cfg["role_id"] and ch:
+                content = f"<@&{cfg['role_id']}>"
+            if screenshot_path:
+                embed.set_image(url="attachment://snapshot.png")
+
+            channel_error = None
+            if ch:
+                try:
+                    await self._send_with_screenshot(
+                        ch, content=content, embed=embed, screenshot_path=screenshot_path
+                    )
+                except Exception as exc:
+                    log.exception("Housing Scraper channel alert failed for guild %s", guild.id)
+                    channel_error = exc
+
+            if usr:
+                try:
+                    # Discord consumes/closes upload handles; never reuse the
+                    # channel's discord.File for a separate destination.
+                    await self._send_with_screenshot(
+                        usr, embed=embed, screenshot_path=screenshot_path
+                    )
+                except Exception:
+                    log.exception("Housing Scraper DM alert failed for guild %s", guild.id)
+
+            if channel_error is not None:
+                # Preserve existing failed-check semantics for channel failures.
+                raise channel_error
+        finally:
+            delete_screenshot(screenshot_path)
 
     # ───────────── Commands ─────────────
 
@@ -642,13 +680,11 @@ class AGSHousingScraper(commands.Cog):
             timestamp=stats["time"]
         )
         ss = None
-        if await self.config.guild(ctx.guild).use_screenshot():
-            ss = await self.capture_screenshot(stats["url"], stats["section_selector"])
-            file = discord.File(ss, filename="snapshot.png")
-            emb.set_image(url="attachment://snapshot.png")
-        else:
-            file = None
-        await ctx.send(embed=emb, file=file)
-        await ctx.tick()
-        if file and os.path.exists(ss):
-            os.remove(ss)
+        try:
+            if await self.config.guild(ctx.guild).use_screenshot():
+                ss = await self.capture_screenshot(stats["url"], stats["section_selector"])
+                emb.set_image(url="attachment://snapshot.png")
+            await self._send_with_screenshot(ctx, embed=emb, screenshot_path=ss)
+            await ctx.tick()
+        finally:
+            delete_screenshot(ss)
