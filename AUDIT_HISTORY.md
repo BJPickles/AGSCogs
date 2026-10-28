@@ -24,7 +24,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 | **AUD-002** | **Fixed in source in [PR #4](https://github.com/BJPickles/AGSCogs/pull/4); isolated CI passed; pending real Red/Discord verification** | All command groups are registered on a single inherited cog; no separate command-class instances. See dated entry below. |
 | **AUD-003–AUD-004** | Open (unchanged) | Housing Scraper timeout handling and blocking Selenium. |
 | **AUD-005** | **Fixed in source in [PR #5](https://github.com/BJPickles/AGSCogs/pull/5); Python 3.9–3.12 CI passed; Red/LevelUp integration unverified** | `StrEnum` replaced with `str, Enum` while retaining string representation; optional and union annotations converted to Python 3.9-compatible `typing` forms. |
-| **AUD-006** | **Fixed in source in the dependency PR; isolated CI and full Red/LevelUp verification pending** | Declared Downloader requirements and LevelUp repo, guarded cog setup with actionable errors, lazy-loaded formatter, and corrected rank API call. |
+| **AUD-006** | **Fixed in source in [PR #6](https://github.com/BJPickles/AGSCogs/pull/6); isolated CI and full Red/LevelUp verification pending** | Declared Downloader requirements and LevelUp repo, guarded cog setup with actionable errors, lazy-loaded formatter, and corrected rank API call. |
 | **AUD-007–AUD-017** | Open (unchanged) | AUD-007 (global Server Status configuration) and other baseline findings remain open. |
 
 ## 2026-10-28 — Baseline audit (all 11 cogs)
@@ -131,7 +131,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 - **Validation:** The Python 3.9, 3.10, 3.11 and 3.12 matrix runs Pydantic 2 imports, module compilation, persistence round trips and annotation compatibility; their unit-test steps passed on [run 40749058006](https://github.com/BJPickles/AGSCogs/actions/runs/40749058006). Python 3.9 required `ubuntu-22.04` because GitHub's current `ubuntu-latest` runner did not provide it. Isolated tests do **not** exercise Red or the LevelUp package. The independently scoped Server Status suite also passed after switching its workflow to `test_serverstatus_security.py`, rather than collecting unrelated tests that depend on Pydantic.
 - **Residual risks and next steps:** AUD-006 remains open: LevelUp/Pillow/Pydantic dependency and API compatibility may still prevent installation or full functionality, even when the models themselves load. Validate the full bot against actual supported Python/Red/LevelUp versions before relying on end-to-end behaviour. Update this dated entry with the CI and PR link after verification.
 
-### 2026-10-28 — AUD-006: AGSProfiles dependency declaration and LevelUp integration (fix PR)
+### 2026-10-28 — [PR #6](https://github.com/BJPickles/AGSCogs/pull/6): AUD-006 AGSProfiles dependencies and LevelUp integration
 
 - **Scope:** `agsprofiles/info.json`, `agsprofiles/common.py`, `agsprofiles/__init__.py`, new `agsprofiles/README.md`, new dependency-contract tests and their GitHub Actions workflow.
 - **Finding status:** AUD-006 fixed in source, pending CI and real Red/LevelUp integration validation; no other finding marked resolved. Historical baseline observation and links remain unchanged.
