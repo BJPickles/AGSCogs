@@ -4,6 +4,7 @@ import tempfile
 import re
 import hashlib
 import datetime
+import logging
 
 import aiohttp
 import discord
@@ -22,6 +23,10 @@ DEFAULT_KEYWORDS         = [
 ]
 DEFAULT_MODES = ["posts", "keywords", "section_hash", "full_hash"]
 FETCH_TIMEOUT_SECONDS = 30
+SCREENSHOT_PAGE_LOAD_TIMEOUT_SECONDS = 30
+SCREENSHOT_SCRIPT_TIMEOUT_SECONDS = 15
+
+log = logging.getLogger("red.agshousingscraper")
 
 
 class AGSHousingScraper(commands.Cog):
@@ -49,6 +54,8 @@ class AGSHousingScraper(commands.Cog):
             use_screenshot=False,
         )
         self.monitor_tasks = {}  # guild.id -> asyncio.Task
+        # Chromium is memory-heavy: permit one screenshot browser at a time.
+        self._screenshot_lock = asyncio.Lock()
         # auto-start on restart
         self._auto_start = bot.loop.create_task(self._auto_start_loop())
         # weekly snapshot task
@@ -279,25 +286,92 @@ class AGSHousingScraper(commands.Cog):
 
     # ───────────── Utilities ─────────────
 
-    async def capture_screenshot(self, url, css_selector=None):
-        """Headless Chrome screenshot of page or specific element."""
+    def _capture_screenshot_sync(self, url, css_selector=None):
+        """Run all synchronous Selenium operations in a worker thread.
+
+        The caller owns a successful result path and must delete it after
+        sending. Partial files are deleted here on any capture failure.
+        """
         opts = Options()
         opts.add_argument("--headless")
         opts.add_argument("--disable-gpu")
         opts.add_argument("--no-sandbox")
         opts.add_argument("--window-size=1280,2000")
-        driver = webdriver.Chrome(options=opts)
-        driver.get(url)
-        if css_selector:
+
+        driver = None
+        screenshot_path = None
+        try:
+            driver = webdriver.Chrome(options=opts)
+            driver.set_page_load_timeout(SCREENSHOT_PAGE_LOAD_TIMEOUT_SECONDS)
+            driver.set_script_timeout(SCREENSHOT_SCRIPT_TIMEOUT_SECONDS)
+            driver.get(url)
+
+            if css_selector:
+                try:
+                    element = driver.find_element("css selector", css_selector)
+                    driver.execute_script("arguments[0].scrollIntoView();", element)
+                except Exception as exc:
+                    # The page screenshot is still useful without the selector.
+                    log.debug("Could not scroll screenshot selector %r: %s", css_selector, exc)
+
+            # Close the descriptor before Chrome writes to the same path,
+            # including on Windows. Do not keep empty/partial images on error.
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                screenshot_path = tmp.name
+            if not driver.save_screenshot(screenshot_path):
+                raise RuntimeError("Chrome failed to save the screenshot")
+            return screenshot_path
+        except BaseException:
+            if screenshot_path is not None:
+                try:
+                    os.remove(screenshot_path)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    log.exception("Failed to delete incomplete screenshot %s", screenshot_path)
+            raise
+        finally:
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    log.exception("Could not close Selenium Chrome driver")
+
+    async def capture_screenshot(self, url, css_selector=None):
+        """Capture without blocking Red's loop or starting parallel Chromes.
+
+        Cancelling this coroutine cannot stop Selenium's running OS thread.
+        Keep the screenshot lock until it finishes and discard any output
+        produced after cancellation, so aborted jobs do not leak temp files.
+        """
+        async with self._screenshot_lock:
+            worker = asyncio.create_task(
+                asyncio.to_thread(self._capture_screenshot_sync, url, css_selector)
+            )
             try:
-                el = driver.find_element("css selector", css_selector)
-                driver.execute_script("arguments[0].scrollIntoView();", el)
-            except:
-                pass
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-        driver.save_screenshot(tmp.name)
-        driver.quit()
-        return tmp.name
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                def discard_cancelled_output(finished):
+                    try:
+                        path = finished.result()
+                    except (Exception, asyncio.CancelledError):
+                        return
+                    if path:
+                        try:
+                            os.remove(path)
+                        except FileNotFoundError:
+                            pass
+                        except OSError:
+                            log.exception("Failed to discard cancelled screenshot %s", path)
+
+                # A done callback also handles repeated task cancellations.
+                worker.add_done_callback(discard_cancelled_output)
+                try:
+                    await asyncio.shield(worker)
+                except Exception:
+                    # The synchronous worker logs and cleans its own failures.
+                    pass
+                raise
 
     async def dispatch_alert(self, guild, content, embed, screenshot_path=None):
         """Send alert embed (and optional screenshot) to alert channel/DM/role."""
