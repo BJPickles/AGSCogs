@@ -148,8 +148,9 @@ class ScheduledPostingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_retries_stop_after_five_minute_window(self):
         self.channel.errors = [Forbidden("blocked")]
+        # NOW is 12:01:00; the window closes at 12:05:00.
+        await self.run_check(NOW + timedelta(minutes=3, seconds=45))
         await self.run_check(NOW + timedelta(minutes=4, seconds=45))
-        await self.run_check(NOW + timedelta(minutes=5, seconds=45))
         self.cog._fetch_joke.assert_awaited_once()
         self.assertEqual(self.settings.values["last_posted_unix"], 0)
 
