@@ -22,7 +22,9 @@ describe the state at the time of the 2026-10-28 baseline review.
 | --- | --- | --- |
 | **AUD-001** | **Fixed in source in [PR #3](https://github.com/BJPickles/AGSCogs/pull/3); pending live Red/Discord verification** | Bot-owner-only commands, per-target private access opt-in, validated and pinned destinations, redirect suppression, and regression tests. See dated entry below. |
 | **AUD-002** | **Fixed in source in [PR #4](https://github.com/BJPickles/AGSCogs/pull/4); isolated CI passed; pending real Red/Discord verification** | All command groups are registered on a single inherited cog; no separate command-class instances. See dated entry below. |
-| **AUD-003–AUD-017** | Open (unchanged) | AUD-005 (Python 3.9/3.10 `StrEnum` incompatibility) and AUD-006 (undeclared LevelUp dependency) may still prevent AGSProfiles from loading even after AUD-002. AUD-007 remains separately open. |
+| **AUD-003–AUD-004** | Open (unchanged) | Housing Scraper timeout handling and blocking Selenium. |
+| **AUD-005** | **Fixed in source by the Python 3.9 compatibility PR; CI/runtime verification pending** | `StrEnum` replaced with `str, Enum` while retaining string representation; optional and union annotations converted to Python 3.9-compatible `typing` forms. |
+| **AUD-006–AUD-017** | Open (unchanged) | AUD-006 (undeclared LevelUp and other dependencies) can still block AGSProfiles from loading. AUD-007 (global Server Status configuration) remains separately open. |
 
 ## 2026-10-28 — Baseline audit (all 11 cogs)
 
@@ -118,5 +120,14 @@ describe the state at the time of the 2026-10-28 baseline review.
 - **Compatibility and risk:** No intentional changes to saved snapshot data, the LevelUp adapter, or scheduling. Inherited commands become available only when the cog imports and Red loads; separate pre-existing import/dependency problems must still be addressed in follow-up fixes. Watch for duplicate commands on reload and ensure Red's command permission checks remain effective.
 - **Validation:** Added a dependency-isolated regression suite that executes the repository's real class definitions using discord.py's actual Cog metaclass/decorators, constructs the cog, and checks top-level commands, nested command groups, aliases and listener registration. The isolated suite stubs Red-only permission decorators and external model imports, so it is **not** a full Red runtime or permissions integration test. The dedicated GitHub Actions Python 3.11/discord.py registration job passed ([run](https://github.com/BJPickles/AGSCogs/actions/runs/40746898565)); the separately existing Server Status and rolling-audit checks also passed on the same revision. No live bot or LevelUp integration run was performed.
 - **Next steps:** Run CI; install and reload on a staging Red bot with compatible Python/LevelUp versions; verify `[p]help agsnapshot`, `[p]agsleaderboard current`, `[p]agprofile`, `[p]agsicons list`, and `[p]agsprofilestatus`. Follow up on AUD-005 and AUD-006.
+
+### 2026-10-28 — AUD-005: AGSProfiles Python 3.9 model compatibility (fix PR)
+
+- **Scope:** `agsprofiles/models.py`, `agsprofiles/common.py`, `tests/test_agsprofiles_python_compat.py`, and new `.github/workflows/agsprofiles-python-compat.yml`. Original source-linked AUD-005 finding is preserved.
+- **Finding status:** AUD-005 fixed in source; Python-version matrix CI and staging Red/LevelUp validation still pending. No other audit finding is marked resolved.
+- **Compatibility fix:** Change `SnapshotType(StrEnum)` to `SnapshotType(str, Enum)`, maintaining its original values and `str(member)` representation; replace `datetime | None` and `Dict[int, Stats] | Iterable[int]` runtime type annotations with `typing.Optional` and `typing.Union`. These expressions previously failed at import time on the declared Python 3.9 minimum, independently of `StrEnum`.
+- **Persistence/data impact:** No migration or format change intended. Regression checks cover unchanged enum JSON values, Pydantic 2 snapshot and archived-year round trips, ID-key handling, and old `model_dump` JSON serialization. No archived data is intentionally rewritten or deleted.
+- **Validation:** Introduced a GitHub Actions matrix running Python 3.9, 3.10, 3.11 and 3.12; each run installs Pydantic 2, compiles the AGSProfiles modules, imports real models and exercises persistence/annotation compatibility. Unit tests are targeted and do **not** require Red or the external LevelUp package.
+- **Residual risks and next steps:** AUD-006 remains open: LevelUp/Pillow/Pydantic dependency and API compatibility may still prevent installation or full functionality, even when the models themselves load. Validate the full bot against actual supported Python/Red/LevelUp versions before relying on end-to-end behaviour. Update this dated entry with the CI and PR link after verification.
 
 <!-- APPEND NEW DATED PR AUDIT ENTRIES BELOW; NEVER DELETE OR REPLACE THE INITIAL BASELINE. -->
