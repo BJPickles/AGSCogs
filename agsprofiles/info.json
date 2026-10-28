@@ -1,5 +1,7 @@
 {
-  "author": ["BJPickles"],
+  "author": [
+    "BJPickles"
+  ],
   "description": "Year-in-review snapshots piggy-backing on LevelUp stats",
   "short": "Annual & periodic Year-in-Review snapshots for LevelUp",
   "type": "COG",
@@ -11,9 +13,20 @@
     "manage_roles"
   ],
   "min_bot_version": "3.5.0",
-  "min_python_version": [3, 9, 0],
-  "install_msg": "Thank you for installing AGSProfiles! Run `[p]agsnapshot manual` to capture your first snapshot.",
+  "min_python_version": [
+    3,
+    9,
+    0
+  ],
+  "install_msg": "AGSProfiles requires Vertyco's LevelUp cog to be installed and loaded first: `[p]repo add vrt-cogs https://github.com/vertyco/vrt-cogs`, `[p]cog install vrt-cogs levelup`, then `[p]load levelup`. After that, load AGSProfiles and run `[p]agsnapshot manual`. Python libraries (Pydantic 2.11 and Pillow) are installed by Downloader; required_cogs is informational and does not install LevelUp automatically.",
   "end_user_data_statement": "This cog stores Discord IDs, snapshot timestamps, and aggregated LevelUp statistics. No other user data is stored.",
   "hidden": false,
-  "disabled": false
+  "disabled": false,
+  "required_cogs": {
+    "LevelUp": "https://github.com/vertyco/vrt-cogs"
+  },
+  "requirements": [
+    "pydantic>=2.11,<2.12",
+    "Pillow>=9.5"
+  ]
 }
