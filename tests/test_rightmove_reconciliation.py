@@ -26,7 +26,7 @@ FIXTURES = json.loads(
 TREE = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
 COG = next(
     node for node in TREE.body
-    if isinstance(node, ast.ClassDef) and node.name == "Rightmove"
+    if isinstance(node, ast.ClassDef) and node.name == "RightmoveCog"
 )
 METHODS = {
     "_reconcile_missing_properties", "_run_scrape", "rm_missingpreview",
