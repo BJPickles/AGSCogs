@@ -28,7 +28,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 | **AUD-006** | **Fixed in source in [PR #6](https://github.com/BJPickles/AGSCogs/pull/6); dependency and compatibility CI passed; real Red/LevelUp verification pending** | Declared Downloader requirements and LevelUp repo, guarded cog setup with actionable errors, lazy-loaded formatter, and corrected rank API call. |
 | **AUD-007** | Open (unchanged) | Server Status configuration remains global across guilds. |
 | **AUD-008** | **Fixed in source in [PR #9](https://github.com/BJPickles/AGSCogs/pull/9); isolated CI passed, live Red verification pending** | Command rejects intervals outside 60–86,400 seconds, and the monitor repairs legacy unsafe settings before sleeping. |
-| **AUD-009** | **Fixed in source in the screenshot attachment PR; CI and live Red verification pending** | Independent upload handles for each destination, explicit file closure, warnings on failed DM delivery, cleanup across channel/DM/force/weekly paths. |
+| **AUD-009** | **Fixed in source in [PR #10](https://github.com/BJPickles/AGSCogs/pull/10); CI and live Red verification pending** | Independent upload handles for each destination, explicit file closure, warnings on failed DM delivery, cleanup across channel/DM/force/weekly paths. |
 | **AUD-010–AUD-017** | Open (unchanged) | Daily Dad Joke, Activity lifecycle, voice and other baseline findings remain open. |
 
 ## 2026-10-28 — Baseline audit (all 11 cogs)
@@ -174,7 +174,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 - **Validation:** [Polling-safety CI run 40763981197](https://github.com/BJPickles/AGSCogs/actions/runs/40763981197) passed the standard-library-only isolated suite executing the actual production helper, `interval` command and `_monitor_loop` method bodies from their source AST with fake config and tasks. Covers accepted boundary values, rejection without side effects, stopped vs running monitor behaviour, clamping of legacy zero/negative/excessive values, invalid legacy types, and no rewriting of valid settings. The HTTP fetch, Selenium safety, Server Status security and required audit-history workflows also passed. No Red/Discord/Chrome installation is needed for the polling suite. **Not performed:** an actual Red guild invocation, real website polling, Discord log delivery or live scheduler-timing test.
 - **Follow-up and residual risk:** AUD-009 screenshot file reuse and send-failure cleanup remain unresolved; AUD-007 remains bot-global. The existing monitor still can exit due to exceptions from logging/config writes, and there is no request backoff beyond the bounded polling interval; these are outside the AUD-008 scope.
 
-### 2026-10-28 — AUD-009: Housing Scraper screenshot attachment lifecycle (fix PR)
+### 2026-10-28 — [PR #10](https://github.com/BJPickles/AGSCogs/pull/10): AUD-009 Housing Scraper attachment lifecycle
 
 - **Scope:** `agshousingscraper/agshousingscraper.py`, `tests/test_housing_scraper_attachments.py`, and `.github/workflows/housing-scraper-attachments.yml`. Original permanent AUD-009 entry and all prior historical entries are unchanged.
 - **Finding state:** AUD-009 fixed in source, awaiting CI and live Red/Discord confirmation. AUD-007 and AUD-010–AUD-017 remain open; no other finding is marked resolved.
