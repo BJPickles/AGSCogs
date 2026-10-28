@@ -29,7 +29,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 | **AUD-007** | Open (unchanged) | Server Status configuration remains global across guilds. |
 | **AUD-008** | **Fixed in source in [PR #9](https://github.com/BJPickles/AGSCogs/pull/9); isolated CI passed, live Red verification pending** | Command rejects intervals outside 60–86,400 seconds, and the monitor repairs legacy unsafe settings before sleeping. |
 | **AUD-009** | **Fixed in source in [PR #10](https://github.com/BJPickles/AGSCogs/pull/10); all isolated CI passed; live Red/Discord verification pending** | Independent upload handles for each destination, explicit file closure, warnings on failed DM delivery, cleanup across channel/DM/force/weekly paths. |
-| **AUD-010** | **Fixed in source by the Daily Dad Joke delivery PR; CI/Red verification pending** | Daily marker and prefix rotation only advance after a successful send; transient send failures retry at most once per minute during the five-minute daily posting window. |
+| **AUD-010** | **Fixed in source in [PR #11](https://github.com/BJPickles/AGSCogs/pull/11); CI/Red verification pending** | Daily marker and prefix rotation only advance after a successful send; transient send failures retry at most once per minute during the five-minute daily posting window. |
 | **AUD-011–AUD-017** | Open (unchanged) | Activity lifecycle, voice and other baseline findings remain open. |
 
 ## 2026-10-28 — Baseline audit (all 11 cogs)
@@ -185,7 +185,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 - **Validation:** [The 10 attachment lifecycle regression tests passed in GitHub Actions](https://github.com/BJPickles/AGSCogs/actions/runs/40765364046). They execute the real production send methods extracted from their source AST using fake Discord uploads and destinations, covering independent channel/DM handles, closed handles after success/failure, channel failure followed by DM attempt, visible DM errors, missing targets, config exceptions, cancellation, no-attachment sends, force-check cleanup and weekly scheduled cleanup. All existing Housing Scraper HTTP, Selenium and polling suites plus the Server Status and rolling-audit workflows also passed. The initial failure was a test harness fake that did not accept positional Discord error messages; the mock was fixed and the suite reran successfully. No actual Discord network call, Chrome process or Red bot integration test was performed.
 - **Residual risks:** `discord.File` upload cleanup is guaranteed by local `finally`, not by actual Discord file-handler behaviour; live permission and upload failures still require staging verification. Failure to delete a temp file due to operating-system permissions is logged but cannot be guaranteed away. AUD-010 and all remaining unrelated findings are not affected.
 
-### 2026-10-28 — AUD-010: Daily Dad Joke failed sends incorrectly marked posted (fix PR)
+### 2026-10-28 — [PR #11](https://github.com/BJPickles/AGSCogs/pull/11): AUD-010 Daily Dad Joke delivery tracking
 
 - **Scope:** `agsdailydadjoke/agsdailydadjoke.py`, new `tests/test_dadjoke_delivery.py`, and `.github/workflows/dadjoke-delivery.yml`. The original AUD-010 source-linked baseline remains unchanged.
 - **Finding status:** AUD-010 fixed in source; CI and live Red/Discord testing pending. No other finding is marked fixed by this PR.
