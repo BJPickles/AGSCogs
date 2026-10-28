@@ -4,7 +4,7 @@ import asyncio
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Any
+from typing import Dict, Iterable, Any, Union
 
 import discord
 from PIL import Image
@@ -142,7 +142,7 @@ async def collect_levelup_stats(
 async def subtract_levelup_data(
     bot: Red,
     guild: discord.Guild,
-    snapshot_data: Dict[int, Stats] | Iterable[int],
+    snapshot_data: Union[Dict[int, Stats], Iterable[int]],
     reset_balances: bool = False,
 ) -> None:
     """
