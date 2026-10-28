@@ -281,8 +281,68 @@ class Activities(commands.Cog):
             self, identifier=9876543210123456, force_registration=True
         )
         self.config.register_guild(**DEFAULT_GUILD)
-        bot.loop.create_task(self._startup_tasks())
-        bot.loop.create_task(self._monthly_prune_scheduler())
+        self._background_tasks: set[asyncio.Task] = set()
+        self._activity_timers: dict[tuple[str, int, str], asyncio.Task] = {}
+        self._unloading = False
+        self._spawn_task(self._startup_tasks())
+        self._spawn_task(self._monthly_prune_scheduler())
+
+    def _spawn_task(self, coro, *, timer_key=None):
+        """Own every spawned task so unload can cancel it deterministically."""
+        if self._unloading:
+            coro.close()
+            return None
+
+        if timer_key is not None:
+            previous = self._activity_timers.get(timer_key)
+            if previous is not None and not previous.done():
+                previous.cancel()
+
+        task = self.bot.loop.create_task(coro)
+        self._background_tasks.add(task)
+        if timer_key is not None:
+            self._activity_timers[timer_key] = task
+
+        def finished(done):
+            self._background_tasks.discard(done)
+            # A cancelled timer must not remove its replacement.
+            if timer_key is not None and self._activity_timers.get(timer_key) is done:
+                self._activity_timers.pop(timer_key, None)
+            if not done.cancelled():
+                error = done.exception()
+                if error is not None:
+                    log.error(
+                        "Activities background task failed",
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
+
+        task.add_done_callback(finished)
+        return task
+
+    def _schedule_timer(self, kind: str, guild_id: int, iid: str, delay: float):
+        """Replace one scheduled start/end timer for an activity."""
+        if kind == "start":
+            coro = self._schedule_start(guild_id, iid, max(0, delay))
+        elif kind == "end":
+            coro = self._auto_end_task(guild_id, iid, max(0, delay))
+        else:
+            raise ValueError(f"Unknown activity timer kind: {kind}")
+        return self._spawn_task(coro, timer_key=(kind, guild_id, iid))
+
+    def _cancel_activity_timers(self, guild_id: int, iid: str):
+        """Stop scheduled work after an activity is manually ended."""
+        for kind in ("start", "end"):
+            timer = self._activity_timers.pop((kind, guild_id, iid), None)
+            if timer is not None:
+                timer.cancel()
+
+    def cog_unload(self):
+        """Cancel all startup, prune, scheduled, and DM-refresh jobs."""
+        self._unloading = True
+        for task in tuple(self._background_tasks):
+            task.cancel()
+        self._activity_timers.clear()
+        self._background_tasks.clear()
 
     async def _startup_tasks(self):
         await self.bot.wait_until_ready()
@@ -322,10 +382,9 @@ class Activities(commands.Cog):
                             message_id=mid,
                         )
                     sched = inst.get("scheduled_time", 0)
-                    if sched > now:
-                        self.bot.loop.create_task(
-                            self._schedule_start(guild.id, iid, sched - now)
-                        )
+                    # Recover missed scheduled starts after a bot outage, too.
+                    if sched:
+                        self._schedule_timer("start", guild.id, iid, sched - now)
 
                 # Extend/Finalize after auto-end
                 if msgs.get("extend"):
@@ -339,9 +398,7 @@ class Activities(commands.Cog):
                     delay = inst["end_time"] - now
                     if delay < 0:
                         delay = 0
-                    self.bot.loop.create_task(
-                        self._auto_end_task(guild.id, iid, delay)
-                    )
+                    self._schedule_timer("end", guild.id, iid, delay)
 
     async def _monthly_prune_scheduler(self):
         await self.bot.wait_until_ready()
@@ -459,6 +516,11 @@ class Activities(commands.Cog):
         inst = insts.get(iid)
         if not inst or inst["status"] != "OPEN":
             return
+        # An extension can move end_time while an older timer wakes up.
+        end_time = inst.get("end_time")
+        if end_time and end_time > time.time():
+            self._schedule_timer("end", guild_id, iid, end_time - time.time())
+            return
 
         # Mark ended
         inst["status"] = "ENDED"
@@ -474,7 +536,7 @@ class Activities(commands.Cog):
                 try:
                     msg = await ch.fetch_message(pm)
                     await msg.edit(embed=self._build_embed(inst, guild), view=None)
-                except:
+                except Exception:
                     pass
 
         # DM owner to extend/finalize
@@ -494,7 +556,7 @@ class Activities(commands.Cog):
                 inst["message_ids"]["extend"] = dm.id
                 insts[iid] = inst
                 await self.config.guild(guild).instances.set(insts)
-            except:
+            except Exception:
                 log.exception("Failed to DM owner about auto-end")
 
         await self._log(
@@ -569,7 +631,7 @@ class Activities(commands.Cog):
                     f"🔔 Your scheduled activity **{inst['title']}** has now started.\nID: `{iid}`",
                     view=view
                 )
-            except:
+            except Exception:
                 log.exception("Failed to DM owner for destination update")
 
         # Public vs Private launch
@@ -585,7 +647,7 @@ class Activities(commands.Cog):
                     insts[iid] = inst
                     await self.config.guild(guild).instances.set(insts)
                     self.bot.add_view(view, message_id=msg.id)
-                except:
+                except Exception:
                     log.exception("Failed to send public activity start message")
             await self._log(guild, f"Scheduled public `{iid}` started at {human_start}.")
         else:
@@ -615,12 +677,12 @@ class Activities(commands.Cog):
                     man_msg = await dm.send(embed=man_e, view=v2)
                     inst["message_ids"].setdefault("manages", {})[str(uid)] = man_msg.id
                     self.bot.add_view(v2, message_id=man_msg.id)
-                except:
+                except Exception:
                     log.exception(f"Failed to DM user {uid} for reminder/manage on start")
             await self._log(guild, f"Scheduled private `{iid}` started at {human_start} (reminders & manage DMs sent).")
 
         # Schedule auto-end
-        self.bot.loop.create_task(self._auto_end_task(guild.id, iid, 12 * 3600))
+        self._schedule_timer("end", guild.id, iid, 12 * 3600)
 
     async def _handle_destination_update(self, interaction: discord.Interaction, dest_text: str, iid: str):
         """Owner updated destination; persist & edit all embeds."""
@@ -855,6 +917,7 @@ class Activities(commands.Cog):
         # 1) mark it ended & persist
         inst["status"] = "ENDED"
         await self.config.guild(ctx.guild).instances.set(insts)
+        self._cancel_activity_timers(ctx.guild.id, iid)
 
         # 2) blow out every embed (public + all DMs) to ❌ ENDED
         await self._update_all_embeds_to_ended(ctx.guild, iid)
@@ -1156,7 +1219,7 @@ class Activities(commands.Cog):
 
         if status=="SCHEDULED":
             delay=inst["scheduled_time"]-now
-            self.bot.loop.create_task(self._schedule_start(guild.id,iid,delay))
+            self._schedule_timer("start", guild.id, iid, delay)
             human=f"<t:{int(inst['scheduled_time'])}:F>"
             if inst["public"]:
                 await ctx.send(f"✅ Scheduled public `{iid}` for {human}.")
@@ -1230,7 +1293,7 @@ class Activities(commands.Cog):
                         await asyncio.sleep(2)
                         try:
                             await msg.edit(embed=new_embed)
-                        except:
+                        except Exception:
                             pass
                 except Exception:
                     log.exception(f"Failed to refresh DM embed for {uid_str} in {cat}")
@@ -1383,7 +1446,7 @@ class Activities(commands.Cog):
             await self.config.guild(guild).instances.set(insts)
 
         # <— newly added: refresh every DM embed for this activity
-        self.bot.loop.create_task(self._refresh_all_dms(guild, iid))
+        self._spawn_task(self._refresh_all_dms(guild, iid))
 
     async def _handle_private_leave(self, interaction: discord.Interaction, iid: str, user_id: int):
         guild, insts, inst = await self._find_instance(iid)
@@ -1407,7 +1470,7 @@ class Activities(commands.Cog):
             log.exception("Failed to edit private‐leave manage message")
 
         # <— newly added: refresh every DM embed for this activity
-        self.bot.loop.create_task(self._refresh_all_dms(guild, iid))
+        self._spawn_task(self._refresh_all_dms(guild, iid))
 
     # ─── RSVP / reminder / private‐invite ────────────────────────────────────────
     async def _handle_rsvp(self, interaction: discord.Interaction, iid: str, target_id: int, accepted: bool):
@@ -1453,7 +1516,7 @@ class Activities(commands.Cog):
         await self.config.guild(guild).instances.set(insts)
 
         # now refresh every other DM embed (owner, other invites/reminders, etc.)
-        self.bot.loop.create_task(self._refresh_all_dms(guild, iid))
+        self._spawn_task(self._refresh_all_dms(guild, iid))
 
     async def _handle_invite_decline(self, interaction: discord.Interaction, iid: str, target_id: int):
         await interaction.response.edit_message(
@@ -1481,7 +1544,7 @@ class Activities(commands.Cog):
         inst["status"] = "OPEN"
         await self.config.guild(guild).instances.set(insts)
         await interaction.response.edit_message(content="✅ Activity extended 12h.", view=None)
-        self.bot.loop.create_task(self._auto_end_task(guild.id, iid, 12 * 3600))
+        self._schedule_timer("end", guild.id, iid, 12 * 3600)
 
     async def _handle_finalize(self, interaction, iid):
         guild, insts, inst = await self._find_instance(iid)
@@ -1489,6 +1552,7 @@ class Activities(commands.Cog):
             return await interaction.response.send_message("Activity not found.", ephemeral=True)
         inst["status"] = "ENDED"
         await self.config.guild(guild).instances.set(insts)
+        self._cancel_activity_timers(guild.id, iid)
 
         # 1) Ack the button and strip that “Finalize” message
         await interaction.response.edit_message(content="✅ Activity finalized.", view=None)
