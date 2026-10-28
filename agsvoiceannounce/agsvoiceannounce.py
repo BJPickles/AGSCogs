@@ -243,7 +243,11 @@ class AGSVoiceAnnounce(commands.Cog):
             log.exception("AGSVoiceAnnounce failed while announcing in guild %s", guild_id)
             await self._notify_owners(guild_id, "I hit an unexpected error while trying to send a voice announcement. Please check the bot logs.")
         finally:
-            self._pending_tasks.pop((guild_id, channel_id), None)
+            # A cancelled older task may finish *after* a replacement was
+            # registered for this channel. Only remove our own entry.
+            key = (guild_id, channel_id)
+            if self._pending_tasks.get(key) is asyncio.current_task():
+                self._pending_tasks.pop(key, None)
 
     async def _is_announcement_candidate(
         self,
