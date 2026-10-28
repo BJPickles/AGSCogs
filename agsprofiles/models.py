@@ -1,12 +1,16 @@
 # models.py
 
 import typing as t
+from typing import Optional
 from datetime import datetime
-from enum import StrEnum
+from enum import Enum
 from pathlib import Path
 from pydantic import BaseModel, Field
 
-class SnapshotType(StrEnum):
+class SnapshotType(str, Enum):
+    # Match StrEnum's string representation on Python 3.9 and newer.
+    __str__ = str.__str__
+
     MANUAL   = "MANUAL"
     DAILY    = "DAILY"
     WEEKLY   = "WEEKLY"
@@ -54,7 +58,7 @@ class UserYearStats(BaseModel):
 
 class YearData(BaseModel):
     finalized:    bool                        = Field(False,    description="Has this year been finalized?")
-    finalized_at: datetime | None             = Field(None,     description="UTC timestamp when finalized")
+    finalized_at: Optional[datetime]           = Field(None,     description="UTC timestamp when finalized")
     users:        t.Dict[int, UserYearStats]  = Field(default_factory=dict, description="user_id → YearStats")
 
 class MasterUserStats(BaseModel):

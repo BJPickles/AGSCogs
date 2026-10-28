@@ -1,0 +1,37 @@
+name: AGS Profiles Python compatibility
+
+on:
+  pull_request:
+    paths:
+      - 'agsprofiles/**'
+      - 'tests/test_agsprofiles_python_compat.py'
+      - '.github/workflows/agsprofiles-python-compat.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'agsprofiles/**'
+      - 'tests/test_agsprofiles_python_compat.py'
+      - '.github/workflows/agsprofiles-python-compat.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  python-compat:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install model dependency
+        run: python -m pip install 'pydantic>=2,<3'
+      - name: Compile AGS Profiles modules
+        run: python -m compileall -q agsprofiles
+      - name: Exercise models and Python 3.9-compatible annotations
+        run: python -m unittest discover -s tests -p 'test_agsprofiles_python_compat.py' -v
