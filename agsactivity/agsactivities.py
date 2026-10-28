@@ -536,7 +536,7 @@ class Activities(commands.Cog):
                 try:
                     msg = await ch.fetch_message(pm)
                     await msg.edit(embed=self._build_embed(inst, guild), view=None)
-                except:
+                except Exception:
                     pass
 
         # DM owner to extend/finalize
@@ -556,7 +556,7 @@ class Activities(commands.Cog):
                 inst["message_ids"]["extend"] = dm.id
                 insts[iid] = inst
                 await self.config.guild(guild).instances.set(insts)
-            except:
+            except Exception:
                 log.exception("Failed to DM owner about auto-end")
 
         await self._log(
@@ -631,7 +631,7 @@ class Activities(commands.Cog):
                     f"🔔 Your scheduled activity **{inst['title']}** has now started.\nID: `{iid}`",
                     view=view
                 )
-            except:
+            except Exception:
                 log.exception("Failed to DM owner for destination update")
 
         # Public vs Private launch
@@ -647,7 +647,7 @@ class Activities(commands.Cog):
                     insts[iid] = inst
                     await self.config.guild(guild).instances.set(insts)
                     self.bot.add_view(view, message_id=msg.id)
-                except:
+                except Exception:
                     log.exception("Failed to send public activity start message")
             await self._log(guild, f"Scheduled public `{iid}` started at {human_start}.")
         else:
@@ -677,7 +677,7 @@ class Activities(commands.Cog):
                     man_msg = await dm.send(embed=man_e, view=v2)
                     inst["message_ids"].setdefault("manages", {})[str(uid)] = man_msg.id
                     self.bot.add_view(v2, message_id=man_msg.id)
-                except:
+                except Exception:
                     log.exception(f"Failed to DM user {uid} for reminder/manage on start")
             await self._log(guild, f"Scheduled private `{iid}` started at {human_start} (reminders & manage DMs sent).")
 
@@ -1293,7 +1293,7 @@ class Activities(commands.Cog):
                         await asyncio.sleep(2)
                         try:
                             await msg.edit(embed=new_embed)
-                        except:
+                        except Exception:
                             pass
                 except Exception:
                     log.exception(f"Failed to refresh DM embed for {uid_str} in {cat}")
