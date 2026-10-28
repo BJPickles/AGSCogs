@@ -3,9 +3,13 @@ import aiohttp
 import asyncio
 from datetime import datetime
 import logging
+import ipaddress
+import socket
 from redbot.core import commands, Config
 from discord.ext import tasks
 from typing import Optional
+
+from .target_security import health_request_target, normalize_host, select_address, validate_port
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +41,7 @@ class AGSServerStatus(commands.Cog):
         self.config = Config.get_conf(self, identifier=123456789012345678, force_registration=True)
         self.config.register_global(**default_global)
         # In-memory storage.
-        self.servers: dict[str, tuple[str, int, Optional[bool], bool]] = {}
+        self.servers: dict[str, tuple[str, int, Optional[bool], bool, bool]] = {}
         self.status_channel: Optional[int] = None
         self.status_messages: dict[str, str] = {}
         self.active: bool = True
@@ -55,7 +59,8 @@ class AGSServerStatus(commands.Cog):
             port = details.get("port")
             last_status = details.get("last_status", None)
             enabled = details.get("enabled", True)
-            self.servers[name] = (ip, port, last_status, enabled)
+            allow_private = details.get("allow_private", False)
+            self.servers[name] = (ip, port, last_status, enabled, allow_private)
         self.status_channel = data.get("status_channel")
         self.status_messages = data.get("status_messages", {})
         self.active = data.get("active", True)
@@ -79,18 +84,47 @@ class AGSServerStatus(commands.Cog):
     async def check_status_task_error(self, error: Exception) -> None:
         logger.error("Error in check_status_task: %s", error)
 
-    async def is_server_online(self, ip: str, port: int, timeout: int = 5) -> bool:
-        """
-        Check the health endpoint of the server.
-        Expects a healthy server to return status 200 at http://<ip>:<port>/api/health.
-        Returns True if healthy, else False.
-        """
-        health_url = f"http://{ip}:{port}/api/health"
+    async def _resolve_address(self, host: str, port: int, *, allow_private: bool = False) -> str:
+        """Resolve a hostname once and select an IP safe for direct connection."""
+        host = normalize_host(host)
+        port = validate_port(port)
         try:
-            async with self.session.get(health_url, timeout=timeout) as response:
+            ipaddress.ip_address(host)
+        except ValueError:
+            results = await asyncio.wait_for(
+                asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM),
+                timeout=3,
+            )
+            addresses = [entry[4][0] for entry in results]
+        else:
+            addresses = [host]
+        return select_address(addresses, allow_private=allow_private)
+
+    async def is_server_online(
+        self, ip: str, port: int, timeout: int = 5, *, allow_private: bool = False
+    ) -> bool:
+        """Check a fixed /api/health endpoint, without DNS rebinding or redirects.
+
+        The network guard is applied on *every* poll, including legacy saved
+        entries. Only the bot owner can opt a specific realm into private access.
+        """
+        try:
+            host = normalize_host(ip)
+            address = await self._resolve_address(host, port, allow_private=allow_private)
+            health_url, host_header = health_request_target(host, address, port)
+        except (ValueError, OSError, asyncio.TimeoutError) as exc:
+            logger.warning("Blocked invalid or unsafe Server Status target %r:%r: %s", ip, port, exc)
+            return False
+        try:
+            async with self.session.get(
+                health_url,
+                timeout=timeout,
+                headers={"Host": host_header},
+                allow_redirects=False,
+            ) as response:
                 return response.status == 200
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logger.debug("Error checking server %s:%s - %s", ip, port, e)
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            logger.debug("Error checking server %s:%s - %s", ip, port, exc)
             return False
 
     async def _send_status_update(self, realm: str, channel: discord.TextChannel, content: str) -> None:
@@ -171,6 +205,7 @@ class AGSServerStatus(commands.Cog):
                 await ctx.send(f"No custom message set for {kind} status.")
 
     @commands.group(invoke_without_command=True)
+    @commands.is_owner()
     async def serverstatus(self, ctx: commands.Context) -> None:
         """
         Manage the monitoring of game servers.
@@ -180,22 +215,40 @@ class AGSServerStatus(commands.Cog):
         await ctx.send_help(ctx.command)
 
     @serverstatus.command()
+    @commands.is_owner()
     @commands.cooldown(1, 5, commands.BucketType.user)
-    async def add(self, ctx: commands.Context, name: str, ip: str, port: int) -> None:
+    async def add(
+        self, ctx: commands.Context, name: str, ip: str, port: int, allow_private: bool = False
+    ) -> None:
+        """Add a monitored server. Use True to explicitly permit a private/LAN IP.
+
+        Example: [p]serverstatus add MyRealm 192.168.1.2 5757 True
         """
-        Add a server to monitor.
-        Examples:
-          [p]serverstatus add Avalon 192.168.1.1 5757
-          [p]serverstatus add "Public Test Realm" 192.168.1.2 5757
-        """
-        self.servers[name] = (ip, port, None, True)
+        try:
+            host = normalize_host(ip)
+            port = validate_port(port)
+            await self._resolve_address(host, port, allow_private=allow_private)
+        except (ValueError, OSError, asyncio.TimeoutError) as exc:
+            return await ctx.send(f"Invalid or unsafe monitoring target: {exc}")
+
+        self.servers[name] = (host, port, None, True, allow_private)
         current_servers = await self.config.servers()
-        current_servers[name] = {"ip": ip, "port": port, "enabled": True, "last_status": None}
+        current_servers[name] = {
+            "ip": host,
+            "port": port,
+            "enabled": True,
+            "last_status": None,
+            "allow_private": allow_private,
+        }
         await self.config.servers.set(current_servers)
-        await ctx.send(f"Added server {name} at {ip}:{port}.")
-        logger.info("Added server %s at %s:%d", name, ip, port)
+        await ctx.send(
+            f"Added server {name} at {host}:{port}."
+            + (" ⚠️ Private/local access explicitly enabled." if allow_private else "")
+        )
+        logger.info("Added server %s at %s:%d (allow_private=%s)", name, host, port, allow_private)
 
     @serverstatus.command()
+    @commands.is_owner()
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def remove(self, ctx: commands.Context, name: str) -> None:
         """Remove a monitored server."""
@@ -220,17 +273,18 @@ class AGSServerStatus(commands.Cog):
             await ctx.send("No servers are being monitored.")
             return
         lines = []
-        for name, (ip, port, status, enabled) in self.servers.items():
+        for name, (ip, port, status, enabled, allow_private) in self.servers.items():
             status_text = "Unknown"
             if status is True:
                 status_text = "Online"
             elif status is False:
                 status_text = "Offline"
-            lines.append(f"{name} - {ip}:{port} - {status_text} - {'Enabled' if enabled else 'Disabled'}")
+            lines.append(f"{name} - {ip}:{port} - {status_text} - {'Enabled' if enabled else 'Disabled'}" + (" (private opt-in)" if allow_private else ""))
         message = "**Monitored Servers:**\n" + "\n".join(lines)
         await ctx.send(message)
 
     @serverstatus.command()
+    @commands.is_owner()
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def togglerealm(self, ctx: commands.Context, name: str, state: Optional[str] = None) -> None:
         """
@@ -240,7 +294,7 @@ class AGSServerStatus(commands.Cog):
         """
         if name not in self.servers:
             return await ctx.send("Server not found.")
-        ip, port, last_status, enabled = self.servers[name]
+        ip, port, last_status, enabled, allow_private = self.servers[name]
         if state:
             state_lower = state.lower()
             if state_lower in ["on", "enable", "enabled"]:
@@ -251,7 +305,7 @@ class AGSServerStatus(commands.Cog):
                 return await ctx.send("Invalid state. Use on/off.")
         else:
             new_enabled = not enabled
-        self.servers[name] = (ip, port, last_status, new_enabled)
+        self.servers[name] = (ip, port, last_status, new_enabled, allow_private)
         current_servers = await self.config.servers()
         if name in current_servers:
             current_servers[name]["enabled"] = new_enabled
@@ -260,7 +314,7 @@ class AGSServerStatus(commands.Cog):
         logger.info("Toggled realm %s to %s", name, "enabled" if new_enabled else "disabled")
         
         if new_enabled and self.status_channel:
-            new_status_bool = await self.is_server_online(ip, port)
+            new_status_bool = await self.is_server_online(ip, port, allow_private=allow_private)
             if last_status is not None and new_status_bool == last_status:
                 return
             current_status = "online" if new_status_bool else "offline"
@@ -289,13 +343,14 @@ class AGSServerStatus(commands.Cog):
             channel = self.bot.get_channel(self.status_channel)
             if channel:
                 await self._send_status_update(name, channel, message)
-            self.servers[name] = (ip, port, new_status_bool, new_enabled)
+            self.servers[name] = (ip, port, new_status_bool, new_enabled, allow_private)
             current_servers = await self.config.servers()
             if name in current_servers:
                 current_servers[name]["last_status"] = new_status_bool
                 await self.config.servers.set(current_servers)
 
     @serverstatus.command()
+    @commands.is_owner()
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def setchannel(self, ctx: commands.Context, channel: discord.TextChannel) -> None:
         """Set the channel where status update messages will be posted."""
@@ -305,6 +360,7 @@ class AGSServerStatus(commands.Cog):
         logger.info("Set status channel to %s", channel.id)
 
     @serverstatus.group(name="setmessage", invoke_without_command=True)
+    @commands.is_owner()
     async def setmessage(self, ctx: commands.Context) -> None:
         """
         Set or view a custom message for status changes.
@@ -321,18 +377,21 @@ class AGSServerStatus(commands.Cog):
         await ctx.send_help(ctx.command)
 
     @setmessage.command(name="online")
+    @commands.is_owner()
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def setmessage_online(self, ctx: commands.Context, *, message_text: Optional[str] = None) -> None:
         """Set or view the custom message for when a realm comes online."""
         await self._set_custom_message("online", message_text, ctx)
 
     @setmessage.command(name="offline")
+    @commands.is_owner()
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def setmessage_offline(self, ctx: commands.Context, *, message_text: Optional[str] = None) -> None:
         """Set or view the custom message for when a realm goes offline."""
         await self._set_custom_message("offline", message_text, ctx)
 
     @serverstatus.command()
+    @commands.is_owner()
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def toggle(self, ctx: commands.Context) -> None:
         """
@@ -357,10 +416,10 @@ class AGSServerStatus(commands.Cog):
         channel = self.bot.get_channel(self.status_channel)
         if not channel:
             return
-        for name, (ip, port, last_status, enabled) in list(self.servers.items()):
+        for name, (ip, port, last_status, enabled, allow_private) in list(self.servers.items()):
             if not enabled:
                 continue
-            new_status = await self.is_server_online(ip, port)
+            new_status = await self.is_server_online(ip, port, allow_private=allow_private)
             if last_status is None or new_status != last_status:
                 current_status = "online" if new_status else "offline"
                 previous_status = "unknown" if last_status is None else ("online" if last_status else "offline")
@@ -386,7 +445,7 @@ class AGSServerStatus(commands.Cog):
                     logger.error("Error formatting message for %s: %s", name, e)
                     message = default_message
                 await self._send_status_update(name, channel, message)
-                self.servers[name] = (ip, port, new_status, enabled)
+                self.servers[name] = (ip, port, new_status, enabled, allow_private)
                 current_servers = await self.config.servers()
                 if name in current_servers:
                     current_servers[name]["last_status"] = new_status
@@ -408,13 +467,13 @@ class AGSServerStatus(commands.Cog):
             embed.add_field(name="Status Channel", value="Not set", inline=False)
         if self.servers:
             server_lines = []
-            for name, (ip, port, status, enabled) in self.servers.items():
+            for name, (ip, port, status, enabled, allow_private) in self.servers.items():
                 status_text = "Unknown"
                 if status is True:
                     status_text = "Online"
                 elif status is False:
                     status_text = "Offline"
-                server_lines.append(f"**{name}** - {ip}:{port} - {status_text} - {'Enabled' if enabled else 'Disabled'}")
+                server_lines.append(f"**{name}** - {ip}:{port} - {status_text} - {'Enabled' if enabled else 'Disabled'}" + (" (private opt-in)" if allow_private else ""))
             embed.add_field(name="Monitored Servers", value="\n".join(server_lines), inline=False)
         else:
             embed.add_field(name="Monitored Servers", value="No servers have been added.", inline=False)
