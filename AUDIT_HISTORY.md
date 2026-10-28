@@ -27,7 +27,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 | **AUD-005** | **Fixed in source in [PR #5](https://github.com/BJPickles/AGSCogs/pull/5); Python 3.9–3.12 CI passed; Red/LevelUp integration unverified** | `StrEnum` replaced with `str, Enum` while retaining string representation; optional and union annotations converted to Python 3.9-compatible `typing` forms. |
 | **AUD-006** | **Fixed in source in [PR #6](https://github.com/BJPickles/AGSCogs/pull/6); dependency and compatibility CI passed; real Red/LevelUp verification pending** | Declared Downloader requirements and LevelUp repo, guarded cog setup with actionable errors, lazy-loaded formatter, and corrected rank API call. |
 | **AUD-007** | Open (unchanged) | Server Status configuration remains global across guilds. |
-| **AUD-008** | **Fixed in source in the Housing Scraper polling-safety PR; CI and live Red verification pending** | Command rejects intervals outside 60–86,400 seconds, and the monitor repairs legacy unsafe settings before sleeping. |
+| **AUD-008** | **Fixed in source in [PR #9](https://github.com/BJPickles/AGSCogs/pull/9); CI and live Red verification pending** | Command rejects intervals outside 60–86,400 seconds, and the monitor repairs legacy unsafe settings before sleeping. |
 | **AUD-009–AUD-017** | Open (unchanged) | AUD-009 (reusing screenshot attachments across Discord sends) and other baseline findings remain open. |
 
 ## 2026-10-28 — Baseline audit (all 11 cogs)
@@ -163,7 +163,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 - **Validation:** [Selenium CI run 40763001061](https://github.com/BJPickles/AGSCogs/actions/runs/40763001061) passed **9 tests** that execute the source's actual screenshot methods, verifying off-event-loop execution, serial browser creation, page/script timeout configuration, proper quitting on success/navigation failure, partial-file deletion when screenshot writing fails or returns false, selector fallback, and cleanup after coroutine cancellation. The [HTTP fetch](https://github.com/BJPickles/AGSCogs/actions/runs/40763001059), Server Status and rolling-audit checks also passed. GitHub Actions installs Selenium but requires no Chrome binary, Red, Discord connection or external housing site. A staging Red/Chrome integration run remains outstanding.
 - **Outstanding:** AUD-009 still requires independent cleanup and attachment handling at Discord send sites; AUD-008 requires interval validation. Neither is marked resolved by this PR. No new unrelated findings.
 
-### 2026-10-28 — AUD-008: Housing Scraper polling intervals allow rapid loop (fix PR)
+### 2026-10-28 — [PR #9](https://github.com/BJPickles/AGSCogs/pull/9): AUD-008 Housing Scraper polling interval safety
 
 - **Scope:** `agshousingscraper/agshousingscraper.py`, new `tests/test_housing_scraper_interval.py`, and new `.github/workflows/housing-scraper-interval.yml`. Original AUD-008 finding and all earlier dated historical entries remain intact.
 - **Finding state:** AUD-008 fixed in source, awaiting CI and a real Red/Discord runtime validation. AUD-007, AUD-009 and all other open findings are unchanged.
