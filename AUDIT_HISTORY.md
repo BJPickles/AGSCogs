@@ -32,7 +32,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 | **AUD-010** | **Fixed in source in [PR #11](https://github.com/BJPickles/AGSCogs/pull/11); isolated CI passed, live Red/Discord verification pending** | Daily marker and prefix rotation only advance after a successful send; transient send failures retry at most once per minute during the five-minute daily posting window. |
 | **AUD-011** | **Fixed in source in [PR #12](https://github.com/BJPickles/AGSCogs/pull/12); nine isolated task tests passed; live Red verification pending** | All startup, prune, timer, and DM-refresh tasks tracked and cancelled on unload; timer replacement and missed-start recovery added. |
 | **AUD-012** | **Fixed in source in [PR #13](https://github.com/BJPickles/AGSCogs/pull/13); isolated pagination CI passed; live Red/Discord validation pending** | `[p]activity list [page]` paginates large guild lists into capped embeds with field/name/value and total-character limits. |
-| **AUD-013** | **Fixed in source in the Voice Announce task-ownership PR; CI and live Red/Discord verification pending** | Delayed-announcement cleanup checks task identity before removing a pending entry; tests cover rapid leave/rejoin, replacement delivery, channel deletion, and unload. |
+| **AUD-013** | **Fixed in source in [PR #14](https://github.com/BJPickles/AGSCogs/pull/14); CI and live Red/Discord verification pending** | Delayed-announcement cleanup checks task identity before removing a pending entry; tests cover rapid leave/rejoin, replacement delivery, channel deletion, and unload. |
 | **AUD-014–AUD-017** | Open (unchanged) | Repository-wide integration coverage, Rightmove destructive reconciliation tests, cog metadata, and hardcoded role defaults remain open. |
 
 ## 2026-10-28 — Baseline audit (all 11 cogs)
@@ -219,7 +219,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 - **Validation:** [Eleven regression tests passed in GitHub Actions](https://github.com/BJPickles/AGSCogs/actions/runs/40769272452); the stdlib-only suite invokes the production list command and pagination helper extracted from source AST, with mocked embeds that enforce Discord per-field/field-count limits. Cases cover empty lists, 20/21/25/52/100 activities, navigation without missing or duplicate activities, invalid pages, oversized names/status fields, total embed character budget and scheduled-start indicators. Dedicated CI compiles the cog. The independently scoped Activity lifecycle, Server Status security and rolling audit-history checks also passed in the initial PR validation. Tests do **not** perform live Red command dispatch or Discord API requests.
 - **Outstanding:** Live Red staging should verify `[p]activity list`, `[p]activity list 2` and invalid pages with real permissions. Existing unrelated AUD-013–AUD-017 issues remain open; no new finding is marked resolved.
 
-### 2026-10-28 — AUD-013: AGS Voice Announce cancelled task erases replacement (fix PR)
+### 2026-10-28 — [PR #14](https://github.com/BJPickles/AGSCogs/pull/14): AUD-013 Voice Announce pending-task ownership
 
 - **Scope:** `agsvoiceannounce/agsvoiceannounce.py`, new `tests/test_agsvoiceannounce_tasks.py`, and `.github/workflows/agsvoiceannounce-tasks.yml`. The original immutable baseline AUD-013 finding and earlier dated audit entries are retained without modification.
 - **Finding state:** AUD-013 fixed in source, pending automated and real Red/Discord voice-event verification. AUD-007 and AUD-014–AUD-017 remain open.
