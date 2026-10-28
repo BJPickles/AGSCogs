@@ -21,7 +21,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 | ID | Current state | Follow-up |
 | --- | --- | --- |
 | **AUD-001** | **Fixed in source in [PR #3](https://github.com/BJPickles/AGSCogs/pull/3); pending live Red/Discord verification** | Bot-owner-only commands, per-target private access opt-in, validated and pinned destinations, redirect suppression, and regression tests. See dated entry below. |
-| **AUD-002** | **Fixed in source in the AGSProfiles command-registration PR; pending CI and real Red/Discord verification** | All command groups are registered on a single inherited cog; no separate command-class instances. See dated entry below. |
+| **AUD-002** | **Fixed in source in [PR #4](https://github.com/BJPickles/AGSCogs/pull/4); pending CI and real Red/Discord verification** | All command groups are registered on a single inherited cog; no separate command-class instances. See dated entry below. |
 | **AUD-003–AUD-017** | Open (unchanged) | AUD-005 (Python 3.9/3.10 `StrEnum` incompatibility) and AUD-006 (undeclared LevelUp dependency) may still prevent AGSProfiles from loading even after AUD-002. AUD-007 remains separately open. |
 
 ## 2026-10-28 — Baseline audit (all 11 cogs)
@@ -110,7 +110,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 - **Validation:** Added stdlib-only unit tests for permission decorator coverage, host and port validation, mixed DNS rejection, IPv4/IPv6 URL construction, direct-IP pinning, blocked legacy private targets, and disabled redirect following. Added a GitHub Actions runner for those tests. No live service, Red/Discord load, or production migration test was executed as part of this review; run the suite and stage before deployment.
 - **Residual risks / next steps:** Bot owners can intentionally opt into private network probing; this power is explicitly trusted and should not be delegated. Consider isolating configuration by guild under AUD-007 and adding integration tests around loaded Red commands, DNS resolution and real Discord permissions. Review existing saved targets before re-enabling private ones.
 
-### 2026-10-28 — AUD-002: AGSProfiles cog construction and command registration (fix PR)
+### 2026-10-28 — [PR #4](https://github.com/BJPickles/AGSCogs/pull/4): AUD-002 AGSProfiles command registration fix
 
 - **Scope:** `agsprofiles/main.py`, the `commands` aggregator and leaderboard/icons command mixins; new `tests/test_agsprofiles_registration.py` and its GitHub Actions workflow.
 - **Finding status:** AUD-002 fixed in source; CI and real Red integration verification pending. The original source-linked finding remains intact. **No additional finding resolved:** AUD-005 and AUD-006 remain open and can still block module imports on an unsupported Python installation or without a compatible LevelUp package.
