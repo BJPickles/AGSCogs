@@ -256,7 +256,7 @@ describe the state at the time of the 2026-10-28 baseline review.
 
 <!-- APPEND NEW DATED PR AUDIT ENTRIES BELOW; NEVER DELETE OR REPLACE THE INITIAL BASELINE. -->
 
-### 2026-11-11 — AGS Activity comprehensive follow-up audit (documentation-only)
+### 2026-11-11 — [PR #16](https://github.com/BJPickles/AGSCogs/pull/16): AGS Activity comprehensive follow-up audit (documentation-only)
 
 - **Scope/base:** Inspected `agsactivity/agsactivities.py` (1,616 lines), `agsactivity/__init__.py`, `agsactivity/info.json`, the existing AGS Activity tests/Actions workflows, and the full rolling audit, on [main @ a6e9a224cdbc](https://github.com/BJPickles/AGSCogs/commit/a6e9a224cdbc2f31970bc8bd40d5c830a1f7bfc5). Recorded detailed source-linked evidence, effects, recommendations, prioritization and regression scenarios in [AGS Activity deep audit](agsactivity/AUDIT_2026-11-11.md). No production cog code, metadata or configuration schema changed.
 - **New findings:** **AUD-018–AUD-031** opened (six High, seven Medium, one Low). High: cross-guild ID ambiguity, non-atomic state mutations, untrusted mass invitations, broken destination modal/DM updates, missing private invitation state/capacity/authorization checks, and public-extension controls not restored. Medium: private activity information disclosure; missing restart view recovery; stranded OPEN records on failed delivery; Discord embed/message lengths; Red end-user deletion; DM edit fan-out; scheduled-owner/auto-end lifecycle. Low: stale install guidance and wizard validation. See report for pinned line-level evidence and steps to verify.
